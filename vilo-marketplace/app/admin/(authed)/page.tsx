@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { Database, Package, Upload, History } from 'lucide-react'
+import { Database, Package, Upload, History, RefreshCw } from 'lucide-react'
 
 export default function AdminHome() {
   const tiles = [
@@ -20,6 +20,12 @@ export default function AdminHome() {
       icon: Upload,
       title: 'ייבוא ממקור חיצוני',
       body: 'גרור PDF / Word / Excel / קישור לאתר. השורות נכנסות לגיליון Google לאישור.',
+    },
+    {
+      href: '/admin/sync',
+      icon: RefreshCw,
+      title: 'סנכרון מ-Sheet',
+      body: 'דחיפת שורות שאושרו מהגיליון אל בסיס הנתונים. אחרי שסימנת _status=approved.',
     },
     {
       href: '/admin/audit',

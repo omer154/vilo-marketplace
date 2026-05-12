@@ -138,6 +138,137 @@ function fmt(v: unknown): string {
   return String(v)
 }
 
+/**
+ * One staging-Sheet row as read back, with both the catalog fields and
+ * the meta columns (_status, _row_id, …) the sync needs to identify and
+ * mark it.
+ */
+export interface StagingRow extends CatalogRow {
+  _status: string
+  _row_id: string
+  _source: string
+  _extracted_at: string
+  /** 1-indexed Sheet row number (header is row 1, first data row is 2). */
+  _sheet_row_number: number
+}
+
+function parseCell(v: unknown): string | null {
+  if (v == null) return null
+  const s = String(v).trim()
+  return s === '' ? null : s
+}
+
+function parseNumber(v: unknown): number | null {
+  const s = parseCell(v)
+  if (s == null) return null
+  const n = Number(s.replace(/[^\d.\-]/g, ''))
+  return Number.isFinite(n) ? n : null
+}
+
+function parseInt32(v: unknown): number | null {
+  const n = parseNumber(v)
+  return n == null ? null : Math.round(n)
+}
+
+/**
+ * Read every row whose _status matches the filter. Default: 'approved'.
+ * Returns the rows + their 1-indexed Sheet row numbers (so the sync can
+ * later mark them synced by row number).
+ */
+export async function readStagingRows(
+  statusFilter: string = 'approved'
+): Promise<StagingRow[]> {
+  const config = getSheetsConfig()
+  if (!config) throw new SheetsNotConfiguredError()
+
+  const sheets = await getSheetsClient()
+  // Read all data — header + body. A2:Z is generous enough for our 23
+  // headers; tighter range if we grow it.
+  const range = `${config.tabName}!A1:Z`
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: config.spreadsheetId,
+    range,
+  })
+  const data = res.data.values as string[][] | undefined
+  if (!data || data.length === 0) return []
+
+  const headers = data[0] as string[]
+  const headerIndex = (name: string) => headers.indexOf(name)
+  const statusCol = headerIndex('_status')
+  if (statusCol === -1) {
+    throw new Error(`Sheet missing _status column. Headers: ${headers.join(', ')}`)
+  }
+
+  const get = (row: string[], name: string) => {
+    const i = headerIndex(name)
+    return i === -1 ? null : row[i]
+  }
+
+  const out: StagingRow[] = []
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i] || []
+    const status = parseCell(row[statusCol])?.toLowerCase()
+    if (status !== statusFilter.toLowerCase()) continue
+
+    out.push({
+      _sheet_row_number: i + 1, // 1-indexed; row 1 is header so first data row is 2
+      _status: status || '',
+      _row_id: parseCell(get(row, '_row_id')) || `row-${i + 1}`,
+      _source: parseCell(get(row, '_source')) || '',
+      _extracted_at: parseCell(get(row, '_extracted_at')) || '',
+      supplier_id: parseCell(get(row, 'supplier_id')),
+      supplier_name: parseCell(get(row, 'supplier_name')),
+      supplier_name_en: parseCell(get(row, 'supplier_name_en')),
+      supplier_category: parseCell(get(row, 'supplier_category')),
+      supplier_website: parseCell(get(row, 'supplier_website')),
+      service_id: parseCell(get(row, 'service_id')),
+      service_name: parseCell(get(row, 'service_name')),
+      service_description: parseCell(get(row, 'service_description')),
+      price_ils: parseNumber(get(row, 'price_ils')),
+      price_type: (() => {
+        const v = parseCell(get(row, 'price_type'))?.toLowerCase()
+        if (v === 'fixed' || v === 'on_request' || v === 'range') return v
+        return null
+      })(),
+      price_min: parseNumber(get(row, 'price_min')),
+      price_max: parseNumber(get(row, 'price_max')),
+      capacity_min: parseInt32(get(row, 'capacity_min')),
+      capacity_max: parseInt32(get(row, 'capacity_max')),
+      duration_hours: parseNumber(get(row, 'duration_hours')),
+      location_mode: (() => {
+        const v = parseCell(get(row, 'location_mode'))?.toLowerCase()
+        if (v === 'at_client' || v === 'at_provider' || v === 'remote' || v === 'hybrid')
+          return v
+        return null
+      })(),
+      tags: parseCell(get(row, 'tags')),
+      supplier_notes: parseCell(get(row, 'supplier_notes')),
+    })
+  }
+  return out
+}
+
+/** Flip _status to 'synced' on the given Sheet row numbers. */
+export async function markRowsSynced(sheetRowNumbers: number[]): Promise<void> {
+  if (sheetRowNumbers.length === 0) return
+  const config = getSheetsConfig()
+  if (!config) throw new SheetsNotConfiguredError()
+
+  const sheets = await getSheetsClient()
+  // Batch all the cell writes. _status is column A.
+  const requests = sheetRowNumbers.map((rowNum) => ({
+    range: `${config.tabName}!A${rowNum}`,
+    values: [['synced']],
+  }))
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: config.spreadsheetId,
+    requestBody: {
+      valueInputOption: 'RAW',
+      data: requests,
+    },
+  })
+}
+
 /** Append catalog rows to the staging Sheet. Returns the spreadsheet URL. */
 export async function appendCatalogRows(
   rows: CatalogRow[],
