@@ -180,14 +180,19 @@ async function normalizeOne(
     throw new Error('Extractor produced no rows, no raw_text, and no pdf_buffer')
   }
 
-  // Cap output at 7K to stay under the 8K-tokens-per-minute tier cap on a
-  // single call. Real-world supplier PDFs (5-30 services) fit easily.
-  // For very large unstructured inputs, the user will see a clear
-  // "max_tokens — split the file" error instead of a silent truncation.
+  // Haiku 4.5 instead of Sonnet 4.6 because:
+  //   1. The user's tier caps Sonnet at 8K output tokens/min — too tight
+  //      for a multi-page supplier PDF in one call.
+  //   2. Haiku has substantially higher per-minute output budget at the
+  //      same tier and is plenty capable for structured tool-use
+  //      extraction.
+  //   3. Cheaper per token, so re-runs are easier on the budget.
+  // Sonnet stays for the schema-mapper.ts call where quality matters
+  // most and the output is tiny.
   const response = await withRateLimitRetry(() =>
     client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 7000,
+      model: 'claude-haiku-4-5',
+      max_tokens: 16_000,
       system: SYSTEM_PROMPT,
       tools: [
         {
