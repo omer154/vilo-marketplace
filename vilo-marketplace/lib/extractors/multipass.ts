@@ -44,14 +44,14 @@ const OUTLINE_SYSTEM = `אתה סורק מסמך ספק של Vilo Marketplace ו
 
 לכל סקציה החזר:
 - header: כותרת הסקציה verbatim כפי שמופיעה במסמך (לדוגמה "מתנות לעובדים", "פעילות לזוגות"). אסור לסכם, לקצר או לרענן.
-- page_start: עמוד התחלה (1-indexed)
-- page_end: עמוד סיום (1-indexed, כולל)
+- page_start: העמוד שבו הכותרת מופיעה במסמך. חובה — חייב להיות העמוד עם הכותרת עצמה. אם הכותרת באמצע עמוד 3, page_start = 3.
+- page_end: העמוד האחרון שמכיל תוכן השייך לסקציה (1-indexed, כולל)
 
-כללים:
+כללים קריטיים:
+- page_start חייב להיות העמוד עם הכותרת — לא העמוד הראשון של הטבלה. אם בעמוד 1 יש את הכותרת וטבלת המחירים ממשיכה לעמוד 3, page_start = 1, page_end = 3.
 - אל תיצור רשימת שירותים. רק סקציות (כותרות גדולות במסמך).
-- אם סקציה מתחילה באמצע עמוד ונמשכת לעמוד הבא — כללי את כל הטווח (start = העמוד שבו הכותרת מופיעה, end = העמוד האחרון שמכיל תוכן של הסקציה).
 - מסמך טיפוסי בעל 3-7 סקציות.
-- שני סקציות יכולות לחלוק עמוד (סקציה A מסתיימת בעמוד 3, סקציה B מתחילה בעמוד 3). זה תקין.`
+- שני סקציות יכולות לחלוק עמוד (סקציה A מסתיימת בעמוד 3, סקציה B מתחילה בעמוד 3 → page_start=3 לסקציה B). זה תקין.`
 
 const EXPAND_SYSTEM = `אתה מחלץ את כל השירותים בסקציה אחת ממסמך ספק של Vilo Marketplace.
 
@@ -253,12 +253,19 @@ async function expandSection(
   client: Anthropic,
   pdfBuffer: Buffer,
   section: DocSection,
-  label: string
+  label: string,
+  totalPages: number,
+  padding = 1
 ): Promise<RowWithConfidence[]> {
-  const slicedBuffer = await slicePdfPages(
-    pdfBuffer,
-    section.page_start,
-    section.page_end
+  // ±padding pages of context. Pass A often reports the page range where
+  // the content sits but misses the page where the section TITLE appears,
+  // and without the title Haiku can't anchor what it's reading.
+  const start = Math.max(1, section.page_start - padding)
+  const end = Math.min(totalPages, section.page_end + padding)
+  const slicedBuffer = await slicePdfPages(pdfBuffer, start, end)
+  const tag = `section:${section.header.slice(0, 30)}`
+  console.log(
+    `[${tag}] attempt with pages ${start}-${end} (Pass A said ${section.page_start}-${section.page_end}, +${padding} padding) — ${slicedBuffer.length} bytes`
   )
 
   const response = await withRateLimitRetry(
@@ -348,7 +355,7 @@ async function expandSection(
               {
                 type: 'text',
                 text:
-                  `מקור: ${label} (סקציה "${section.header}", עמודים ${section.page_start}-${section.page_end})\n\n` +
+                  `מקור: ${label} (סקציה "${section.header}", עמודים ${start}-${end})\n\n` +
                   `חלץ את כל השירותים בסקציה "${section.header}".\n` +
                   `כל מדרגת תמחור / וריאציה = שורה נפרדת.\n` +
                   `חובה למלא location_mode בכל שורה (בחר אחד מ-at_client / at_provider / remote / hybrid — אסור null).`,
@@ -358,36 +365,60 @@ async function expandSection(
           },
         ],
       }),
-    `section:${section.header.slice(0, 30)}`
+    tag
+  )
+
+  console.log(
+    `[${tag}] response stop_reason=${response.stop_reason}, blocks=[${response.content.map((c) => c.type).join(',')}]`
   )
 
   if (response.stop_reason === 'max_tokens') {
-    console.warn(
-      `[section:${section.header.slice(0, 30)}] hit max_tokens — output may be partial`
-    )
+    console.warn(`[${tag}] hit max_tokens — output may be partial`)
   }
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
-    console.warn(
-      `[section:${section.header.slice(0, 30)}] no tool use. stop_reason=${response.stop_reason}`
-    )
+    console.warn(`[${tag}] no tool_use block returned`)
     return []
   }
   const input = toolUse.input as {
     rows?: CatalogRow[]
     confidence?: Partial<Record<keyof CatalogRow, ConfidenceScore>>[]
   }
-  if (!Array.isArray(input.rows)) return []
+  if (!Array.isArray(input.rows)) {
+    console.warn(
+      `[${tag}] tool_use.input.rows missing or not array. input keys: [${Object.keys(input || {}).join(',')}]`
+    )
+    return []
+  }
 
-  console.log(
-    `[section:${section.header.slice(0, 30)}] ${input.rows.length} rows`
-  )
+  console.log(`[${tag}] ${input.rows.length} rows`)
 
   return input.rows.map((row, i) => ({
     ...row,
     _confidence: input.confidence?.[i],
   }))
+}
+
+/**
+ * Section-level retry. If the first attempt returned 0 rows (usually because
+ * Pass A's page range missed where the section header lives), retry with
+ * wider padding (+2 pages) to almost-guarantee the header is in the slice.
+ */
+async function expandSectionWithRetry(
+  client: Anthropic,
+  pdfBuffer: Buffer,
+  section: DocSection,
+  label: string,
+  totalPages: number
+): Promise<RowWithConfidence[]> {
+  const first = await expandSection(client, pdfBuffer, section, label, totalPages, 1)
+  if (first.length > 0) return first
+
+  console.warn(
+    `[section:${section.header.slice(0, 30)}] returned 0 rows — retrying with wider page window`
+  )
+  return expandSection(client, pdfBuffer, section, label, totalPages, 3)
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -466,7 +497,13 @@ export async function multipassPdf(
     outline.sections,
     EXPAND_CONCURRENCY,
     async (section) => {
-      const rows = await expandSection(client, pdfBuffer, section, label)
+      const rows = await expandSectionWithRetry(
+        client,
+        pdfBuffer,
+        section,
+        label,
+        totalPages
+      )
       return pinCategory(rows, section.header)
     }
   )
