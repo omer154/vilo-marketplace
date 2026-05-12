@@ -31,7 +31,7 @@ const SYSTEM_PROMPT = `אתה עוזר חילוץ נתונים של פלטפור
 - אם נתון חסר — החזר null, אל תמציא.
 - supplier_category חייב להיות אחד מ: ${CATEGORY_VALUES.join(', ')}. נסה לבחור את המתאים ביותר; אם באמת אין התאמה, החזר null.
 - price_type: 'fixed' אם יש מחיר בודד, 'range' אם יש טווח (price_min ו-price_max), 'on_request' אם לא מצוין מחיר ספציפי.
-- location: 'offsite' = במתחם הספק, 'onsite' = במשרד הלקוח, 'flexible' = שניהם, 'remote' = מקוון. בחר את המתאים ביותר.
+- location_mode: 'at_provider' = במתחם של הספק (קליניקה / סטודיו), 'at_client' = במשרד / במתחם של הלקוח, 'remote' = מקוון, 'hybrid' = שתי האפשרויות אפשריות. בחר את המתאים ביותר.
 - duration_hours: בשעות (לדוגמה 1.5 לשעה וחצי).
 - אם השירות מציע כמה מדרגות תמחור (לדוגמה: עד 20 איש 1000 ש"ח, 21-40 איש 1500 ש"ח), צור שורה נפרדת לכל מדרגה עם capacity_min/max ו-price_ils מתאימים.
 - supplier_notes: כל מידע נוסף שלא נכנס לשדות אחרים — מיקומים, אילוצים, הערות מחיר, מע"מ.
@@ -97,9 +97,9 @@ const TOOL_INPUT_SCHEMA = {
           capacity_min: { type: ['integer', 'null'] },
           capacity_max: { type: ['integer', 'null'] },
           duration_hours: { type: ['number', 'null'] },
-          location: {
+          location_mode: {
             type: ['string', 'null'],
-            enum: ['offsite', 'onsite', 'flexible', 'remote', null],
+            enum: ['at_client', 'at_provider', 'remote', 'hybrid', null],
           },
           tags: { type: ['string', 'null'] },
           supplier_notes: { type: ['string', 'null'] },

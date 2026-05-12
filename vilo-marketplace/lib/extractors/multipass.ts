@@ -36,6 +36,7 @@ interface ServiceStub {
   page_number: number      // 1-indexed
   section_header: string | null
   preview: string | null   // short snippet to help the expand call
+  expected_row_count: number // how many pricing-tier rows we expect Pass B to return
 }
 
 const OUTLINE_SYSTEM = `אתה סורק מסמכי ספקים של Vilo Marketplace ומחזיר רשימת שירותים.
@@ -44,8 +45,13 @@ const OUTLINE_SYSTEM = `אתה סורק מסמכי ספקים של Vilo Marketpl
 - החזר כל שירות שמופיע במסמך, כולל גרסאות שונות של אותו שירות (למשל "ייעוץ פרטני" ו"ייעוץ קבוצתי" הם שני שירותים).
 - אל תיצור שורות נפרדות לכל מדרגת תמחור — זה נעשה בשלב הבא. שורה אחת לכל שירות (אפילו אם יש לו 5 רמות מחיר).
 - page_number = העמוד שבו השירות מתחיל (1-indexed).
-- section_header = הכותרת/הקטגוריה שמעליו במסמך (לדוגמה "פעילות לזוגות", "מתנות לעובדים").
-- preview = משפט אחד שמתאר את השירות — יעזור לזיהוי בשלב הבא.`
+- section_header = הכותרת/הקטגוריה שמעליו במסמך (לדוגמה "פעילות לזוגות", "מתנות לעובדים"). חובה להחזיר את הכותרת בדיוק כפי שהיא במסמך, ללא ניסוח מחדש.
+- preview = משפט אחד שמתאר את השירות — יעזור לזיהוי בשלב הבא.
+- expected_row_count = כמה שורות שלב הבא צפוי להחזיר עבור השירות הזה. ספור את מדרגות התמחור/הוואריאציות הנפרדות:
+    * שירות פשוט עם מחיר אחד = 1
+    * שירות עם 6 רמות מחיר (לדוגמה 3 מדרגות בקליניקה + 3 במקום העבודה) = 6
+    * "בשבילנו" עם מפגש בודד וסדרה = 2
+  אם השירות מפנה לתמחיר של שירות אחר ("ראה תמחור X"), ספור את אותן הוואריאציות.`
 
 const EXPAND_SYSTEM = `אתה מחלץ פרטים מלאים של שירות בודד מתוך מסמך ספק.
 
@@ -54,8 +60,21 @@ const EXPAND_SYSTEM = `אתה מחלץ פרטים מלאים של שירות ב�
 
 הוראות:
 - צור שורה נפרדת לכל מדרגת תמחור או וריאציה (מחיר שונה / כמות אנשים שונה / מיקום שונה / חבילת שעות).
+- חובה: אם המשתמש אומר "אני מצפה ל-N שורות", מצא בדיוק N וריאציות. אל תאחד אותן לשורה אחת.
 - שמור טקסט בעברית verbatim. אל תתרגם.
 - price_type: 'fixed' למחיר בודד, 'range' לטווח, 'on_request' אם אין מחיר ספציפי.
+
+שדה location_mode — חובה לדייק:
+- at_provider = במתחם של הספק (קליניקה / סטודיו / מתקן של הספק)
+- at_client = במשרד / במתחם של הלקוח (עובדי הארגון)
+- remote = מקוון (זום וכו')
+- hybrid = יכול להתקיים בשתיהן, לפי בחירה
+
+דוגמאות:
+- "בקליניקה שלי" / "בקליניקה בגבעת שמואל" → at_provider
+- "במקום העבודה" / "בחצרי הלקוח" → at_client
+- שיעור יוגה אצל הספק או אצל הלקוח, גמיש → hybrid
+
 - supplier_notes: כל מידע שלא נכנס לשדות אחרים — מע"מ, נסיעות, יחידת תמחור, תיאור התמחיר.
 - confidence (לכל שדה): 5 = קראתי בדיוק מהמסמך, 3 = הסקתי הגיוני, 1 = ניחוש.`
 
@@ -147,8 +166,13 @@ async function outlineScanPdf(
                       page_number: { type: 'integer' },
                       section_header: { type: ['string', 'null'] },
                       preview: { type: ['string', 'null'] },
+                      expected_row_count: { type: 'integer' },
                     },
-                    required: ['service_name', 'page_number'],
+                    required: [
+                      'service_name',
+                      'page_number',
+                      'expected_row_count',
+                    ],
                   },
                 },
               },
@@ -190,7 +214,14 @@ async function outlineScanPdf(
   if (!Array.isArray(input.stubs)) {
     throw new Error('Outline scan returned no stubs array.')
   }
-  return input.stubs
+  // Default expected_row_count to 1 if the model omitted it.
+  return input.stubs.map((s) => ({
+    ...s,
+    expected_row_count:
+      typeof s.expected_row_count === 'number' && s.expected_row_count > 0
+        ? s.expected_row_count
+        : 1,
+  }))
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -206,7 +237,8 @@ async function expandServiceFromPdf(
   pdfBuffer: Buffer,
   stub: ServiceStub,
   totalPages: number,
-  label: string
+  label: string,
+  retryReason: string | null = null
 ): Promise<RowWithConfidence[]> {
   // Slice to ±1 page window around the stub
   const start = Math.max(1, stub.page_number - 1)
@@ -246,10 +278,16 @@ async function expandServiceFromPdf(
                               type: ['string', 'null'],
                               enum: ['fixed', 'on_request', 'range', null],
                             }
-                          : col === 'location'
+                          : col === 'location_mode'
                           ? {
                               type: ['string', 'null'],
-                              enum: ['offsite', 'onsite', 'flexible', 'remote', null],
+                              enum: [
+                                'at_client',
+                                'at_provider',
+                                'remote',
+                                'hybrid',
+                                null,
+                              ],
                             }
                           : { type: ['string', 'null'] },
                       ])
@@ -299,7 +337,9 @@ async function expandServiceFromPdf(
                   `- שם: ${stub.service_name}\n` +
                   (stub.section_header ? `- קטגוריה: ${stub.section_header}\n` : '') +
                   (stub.preview ? `- תיאור: ${stub.preview}\n` : '') +
-                  `\nכל מדרגת תמחור / וריאציה = שורה נפרדת.`,
+                  `\nאני מצפה לקבל בדיוק ${stub.expected_row_count} שורה(ות). ` +
+                  `כל מדרגת תמחור / וריאציה = שורה נפרדת.` +
+                  (retryReason ? `\n\nהערה: ${retryReason}` : ''),
               },
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ] as any,
@@ -332,6 +372,44 @@ async function expandServiceFromPdf(
   }))
 }
 
+/**
+ * Run Pass B and, if the model returned far fewer rows than the stub
+ * promised, retry once with explicit feedback about the shortfall.
+ * Caps at one retry to keep the call budget bounded.
+ */
+async function expandWithRetry(
+  client: Anthropic,
+  pdfBuffer: Buffer,
+  stub: ServiceStub,
+  totalPages: number,
+  label: string
+): Promise<RowWithConfidence[]> {
+  const first = await expandServiceFromPdf(client, pdfBuffer, stub, totalPages, label)
+  const expected = Math.max(1, stub.expected_row_count)
+
+  // If we got at least half of what was promised (or expected=1 and got >=1),
+  // accept. Otherwise retry once with a strong nudge.
+  if (first.length >= expected || expected <= 1) {
+    return first
+  }
+
+  const reason =
+    `החזרת ${first.length} שורות אבל המסמך מתאר ${expected} ` +
+    `וריאציות שונות (מדרגות תמחור / מיקומים / חבילות). מצא את כולן.`
+  console.warn(
+    `[expand:${stub.service_name.slice(0, 30)}] short by ${expected - first.length} rows, retrying`
+  )
+  const second = await expandServiceFromPdf(
+    client,
+    pdfBuffer,
+    stub,
+    totalPages,
+    label,
+    reason
+  )
+  return second.length > first.length ? second : first
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Pass C — merge + validate
 // ──────────────────────────────────────────────────────────────────────
@@ -355,7 +433,7 @@ function rowKey(r: CatalogRow): string {
     r.price_ils,
     r.capacity_min,
     r.capacity_max,
-    r.location,
+    r.location_mode,
   ]
     .map((v) => (v == null ? '' : String(v)))
     .join('|')
@@ -381,6 +459,20 @@ export function mergeAndValidate(rows: RowWithConfidence[]): CatalogRow[] {
 // Public entry
 // ──────────────────────────────────────────────────────────────────────
 
+/**
+ * Force every row's supplier_category to match the source section header
+ * the outline pass found. Keeps categories consistent within a doc — the
+ * Excel/Sheet then has one stable label per PDF section, instead of the
+ * model inventing fresh phrasings per call.
+ */
+function pinCategoryFromStub(
+  stub: ServiceStub,
+  rows: RowWithConfidence[]
+): RowWithConfidence[] {
+  if (!stub.section_header) return rows
+  return rows.map((r) => ({ ...r, supplier_category: stub.section_header }))
+}
+
 export async function multipassPdf(
   client: Anthropic,
   pdfBuffer: Buffer,
@@ -391,9 +483,10 @@ export async function multipassPdf(
 
   const totalPages = (await PDFDocument.load(pdfBuffer)).getPageCount()
 
-  const expanded = await pMap(stubs, EXPAND_CONCURRENCY, (stub) =>
-    expandServiceFromPdf(client, pdfBuffer, stub, totalPages, label)
-  )
+  const expanded = await pMap(stubs, EXPAND_CONCURRENCY, async (stub) => {
+    const rows = await expandWithRetry(client, pdfBuffer, stub, totalPages, label)
+    return pinCategoryFromStub(stub, rows)
+  })
 
   return mergeAndValidate(expanded.flat())
 }

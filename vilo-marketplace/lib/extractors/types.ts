@@ -12,6 +12,8 @@ export type ConfidenceScore = 1 | 2 | 3 | 4 | 5
  * Every extractor — Excel, PDF, Word, URL, free text — normalizes to this.
  * The Google Sheets staging tab + the DB sync both speak this vocabulary.
  */
+export type LocationMode = 'at_client' | 'at_provider' | 'remote' | 'hybrid'
+
 export interface CatalogRow {
   supplier_id: string | null
   supplier_name: string | null
@@ -28,7 +30,16 @@ export interface CatalogRow {
   capacity_min: number | null
   capacity_max: number | null
   duration_hours: number | null
-  location: 'offsite' | 'onsite' | 'flexible' | 'remote' | null
+  /**
+   * Where the service is delivered. Unambiguous about whose site is whose:
+   *   at_client   = at the buyer's workplace / office / venue
+   *   at_provider = at the supplier's clinic / studio / venue
+   *   remote      = online / over video
+   *   hybrid      = either at_client or at_provider, supplier's choice
+   * Replaces the old `location` enum (offsite/onsite/flexible/remote) which
+   * was constantly inverted by the model.
+   */
+  location_mode: LocationMode | null
   tags: string | null
   supplier_notes: string | null
   /** Average confidence across populated fields, 1-5. Computed at merge time. */
@@ -53,7 +64,7 @@ export const CATALOG_COLUMNS: (keyof CatalogRow)[] = [
   'capacity_min',
   'capacity_max',
   'duration_hours',
-  'location',
+  'location_mode',
   'tags',
   'supplier_notes',
 ]

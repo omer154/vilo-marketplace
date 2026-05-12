@@ -34,7 +34,7 @@ const SHEET_HEADERS = [
   'capacity_min',
   'capacity_max',
   'duration_hours',
-  'location',
+  'location_mode',
   'tags',
   'supplier_notes',
 ] as const
@@ -177,7 +177,7 @@ export async function appendCatalogRows(
     fmt(r.capacity_min),
     fmt(r.capacity_max),
     fmt(r.duration_hours),
-    fmt(r.location),
+    fmt(r.location_mode),
     fmt(r.tags),
     fmt(r.supplier_notes),
   ])

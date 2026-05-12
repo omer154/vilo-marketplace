@@ -37,7 +37,7 @@ const PRICING_UNIT_VALUES = [
   'unit',
 ] as const
 
-const LOCATION_VALUES = ['offsite', 'onsite', 'flexible', 'remote'] as const
+const LOCATION_VALUES = ['at_client', 'at_provider', 'remote', 'hybrid'] as const
 
 const SCHEMA_SYSTEM = `You're mapping a third-party data source onto Vilo Marketplace's canonical service catalog schema.
 
@@ -56,6 +56,12 @@ You'll see the source's column headers and a sample of rows. Produce three mappi
    The source may use Hebrew (קבוצה, שעה, אדם, פרויקט, חודש, יחידה) or English. Map each distinct value.
 
 4. location_mappings (optional): any string -> one of: ${LOCATION_VALUES.join(', ')}.
+   Semantics:
+     at_provider = at the supplier's clinic / studio / venue
+     at_client   = at the buyer's office / workplace
+     remote      = online / video
+     hybrid      = either, supplier's choice
+   Hebrew examples: "בקליניקה" -> at_provider, "במקום העבודה" -> at_client.
    If the source has no location column, return {}.
 
 5. duration_parser: if the source's duration column is text like "60-75 דק'" or "1.5 hours",
@@ -250,11 +256,11 @@ export function applySchemaToRows(
         case 'duration_hours':
           r.duration_hours = parseDurationToHours(rawVal, schema.duration_parser)
           break
-        case 'location': {
+        case 'location_mode': {
           const s = toStr(rawVal)
           if (s) {
             const mapped = schema.location_mappings[s]
-            if (mapped) r.location = mapped as CatalogRow['location']
+            if (mapped) r.location_mode = mapped as CatalogRow['location_mode']
           }
           break
         }
@@ -309,7 +315,7 @@ export function applySchemaToRows(
       capacity_min: r.capacity_min ?? null,
       capacity_max: r.capacity_max ?? null,
       duration_hours: r.duration_hours ?? null,
-      location: r.location ?? null,
+      location_mode: r.location_mode ?? null,
       tags: r.tags ?? null,
       supplier_notes: r.supplier_notes ?? null,
     }
