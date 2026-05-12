@@ -1,0 +1,69 @@
+export type PricingUnit = 'person' | 'group' | 'hour' | 'project' | 'month' | 'unit'
+export type LocationType = 'onsite' | 'remote' | 'both'
+export type CategorySlug =
+  | 'wellbeing'
+  | 'teambuilding'
+  | 'learning'
+  | 'food'
+  | 'culture'
+  | 'travel'
+  | 'sport'
+  | 'tech'
+  | 'consulting'
+
+export interface Supplier {
+  id: string
+  name: string
+  slug: string
+  logo_url: string | null
+  contact_email: string | null
+  description_short: string | null
+  is_active: boolean
+  services?: Service[]
+}
+
+export interface Service {
+  id: string
+  supplier_id: string
+  supplier_name?: string
+  service_name: string
+  category_primary: CategorySlug
+  category_secondary: string | null
+  description_short: string | null
+  tags: string[] | null
+  duration_minutes: number | null
+  location_type: LocationType
+  language: string
+  min_participants: number | null
+  max_participants: number | null
+  price: number | null
+  pricing_unit: PricingUnit | null
+  notes: string | null
+  is_active: boolean
+}
+
+export interface Category {
+  slug: CategorySlug
+  name_he: string
+  icon: string
+  color_bg: string
+  color_text: string
+  color_dot: string
+  sort_order: number
+}
+
+export interface FilterState {
+  activeCategories: CategorySlug[]
+  budgetMax: number | null
+  participantsCount: number | null
+  locationTypes: LocationType[]
+  searchQuery: string
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: Date
+  matchedServices?: Service[]
+}

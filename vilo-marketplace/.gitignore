@@ -1,0 +1,8 @@
+.env.local
+node_modules
+.next
+.scripts-out
+*.tsbuildinfo
+next-env.d.ts
+
+.vercel

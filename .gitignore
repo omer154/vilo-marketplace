@@ -1,0 +1,13 @@
+.DS_Store
+*.log
+.env
+.env.local
+.env.*.local
+
+node_modules/
+.next/
+.scripts-out/
+*.tsbuildinfo
+
+.vercel
+.claude/settings.local.json
