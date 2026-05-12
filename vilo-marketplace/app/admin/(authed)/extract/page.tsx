@@ -1,43 +1,43 @@
 'use client'
 
 import { useState, useRef, FormEvent } from 'react'
-import { Upload, Link2, FileText, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
+import {
+  Upload,
+  Link2,
+  FileText,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  ExternalLink,
+} from 'lucide-react'
 import type { CatalogRow } from '@/lib/extractors/types'
-import { CATALOG_COLUMNS } from '@/lib/extractors/types'
 
 type ResultState =
   | { kind: 'idle' }
   | { kind: 'extracting'; label: string }
-  | { kind: 'success'; rows: CatalogRow[]; source_label: string }
-  | { kind: 'error'; message: string }
+  | { kind: 'pushing'; label: string; rows_count: number }
+  | {
+      kind: 'success'
+      rows_count: number
+      source_label: string
+      sheet_url: string
+      avg_confidence: number | null
+    }
+  | {
+      kind: 'extracted_no_sheets'
+      rows: CatalogRow[]
+      source_label: string
+      setup_required: string[]
+    }
+  | { kind: 'error'; message: string; stage: 'extraction' | 'push' }
 
-const COL_LABELS_HE: Partial<Record<keyof CatalogRow, string>> = {
-  supplier_name: 'ספק',
-  supplier_category: 'קטגוריה',
-  service_name: 'שירות',
-  price_ils: 'מחיר',
-  price_type: 'סוג מחיר',
-  capacity_min: 'מינ׳ משת׳',
-  capacity_max: 'מקס׳ משת׳',
-  duration_hours: 'שעות',
-  location: 'מיקום',
-  tags: 'תגיות',
-  supplier_notes: 'הערות',
+function avgConfidence(rows: CatalogRow[]): number | null {
+  const scored = rows
+    .map((r) => r._confidence_avg)
+    .filter((c): c is number => typeof c === 'number')
+  if (scored.length === 0) return null
+  return scored.reduce((s, v) => s + v, 0) / scored.length
 }
-
-const VISIBLE_COLS: (keyof CatalogRow)[] = [
-  'supplier_name',
-  'supplier_category',
-  'service_name',
-  'price_ils',
-  'price_type',
-  'capacity_min',
-  'capacity_max',
-  'duration_hours',
-  'location',
-  'tags',
-  'supplier_notes',
-]
 
 export default function ExtractPage() {
   const [state, setState] = useState<ResultState>({ kind: 'idle' })
@@ -45,26 +45,90 @@ export default function ExtractPage() {
   const [pastedText, setPastedText] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const handleResponse = async (
+  const pushToSheet = async (
+    rows: CatalogRow[],
+    sourceLabel: string
+  ): Promise<ResultState> => {
+    setState({ kind: 'pushing', label: sourceLabel, rows_count: rows.length })
+    try {
+      const res = await fetch('/api/admin/sheets/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows, source_label: sourceLabel }),
+      })
+      const json = await res.json()
+
+      if (res.status === 503 && json.error === 'sheets_not_configured') {
+        return {
+          kind: 'extracted_no_sheets',
+          rows,
+          source_label: sourceLabel,
+          setup_required: json.required_env || [],
+        }
+      }
+      if (!res.ok) {
+        return {
+          kind: 'error',
+          stage: 'push',
+          message: json.error || `push failed (${res.status})`,
+        }
+      }
+      return {
+        kind: 'success',
+        rows_count: rows.length,
+        source_label: sourceLabel,
+        sheet_url: json.url,
+        avg_confidence: avgConfidence(rows),
+      }
+    } catch (err) {
+      return {
+        kind: 'error',
+        stage: 'push',
+        message: err instanceof Error ? err.message : 'unknown error',
+      }
+    }
+  }
+
+  const handleExtractResponse = async (
     res: Response,
     label: string
-  ): Promise<ResultState> => {
+  ): Promise<void> => {
     let json: { rows?: CatalogRow[]; error?: string } = {}
     try {
       json = await res.json()
     } catch {
-      return { kind: 'error', message: `שגיאת רשת (סטטוס ${res.status})` }
+      setState({
+        kind: 'error',
+        stage: 'extraction',
+        message: `שגיאת רשת (סטטוס ${res.status})`,
+      })
+      return
     }
     if (!res.ok) {
-      return { kind: 'error', message: json.error || `extraction failed (${res.status})` }
+      setState({
+        kind: 'error',
+        stage: 'extraction',
+        message: json.error || `extraction failed (${res.status})`,
+      })
+      return
     }
     if (!Array.isArray(json.rows)) {
-      return {
+      setState({
         kind: 'error',
+        stage: 'extraction',
         message: 'התשובה מהשרת לא הכילה שורות. נסה שוב או בדוק את הקובץ.',
-      }
+      })
+      return
     }
-    return { kind: 'success', rows: json.rows, source_label: label }
+    if (json.rows.length === 0) {
+      setState({
+        kind: 'error',
+        stage: 'extraction',
+        message: 'לא נמצאו שירותים במקור הזה. נסה קובץ אחר.',
+      })
+      return
+    }
+    setState(await pushToSheet(json.rows, label))
   }
 
   const submitFile = async (file: File) => {
@@ -72,14 +136,12 @@ export default function ExtractPage() {
     const form = new FormData()
     form.append('file', file)
     try {
-      const res = await fetch('/api/admin/extract', {
-        method: 'POST',
-        body: form,
-      })
-      setState(await handleResponse(res, file.name))
+      const res = await fetch('/api/admin/extract', { method: 'POST', body: form })
+      await handleExtractResponse(res, file.name)
     } catch (err) {
       setState({
         kind: 'error',
+        stage: 'extraction',
         message: err instanceof Error ? err.message : 'unknown error',
       })
     }
@@ -95,10 +157,11 @@ export default function ExtractPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: url.trim() }),
       })
-      setState(await handleResponse(res, url))
+      await handleExtractResponse(res, url)
     } catch (err) {
       setState({
         kind: 'error',
+        stage: 'extraction',
         message: err instanceof Error ? err.message : 'unknown error',
       })
     }
@@ -116,22 +179,25 @@ export default function ExtractPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: trimmed, label }),
       })
-      setState(await handleResponse(res, label))
+      await handleExtractResponse(res, label)
     } catch (err) {
       setState({
         kind: 'error',
+        stage: 'extraction',
         message: err instanceof Error ? err.message : 'unknown error',
       })
     }
   }
+
+  const busy = state.kind === 'extracting' || state.kind === 'pushing'
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">ייבוא ממקור חיצוני</h1>
         <p className="text-gray-600 text-sm mt-1">
-          העלה קובץ (Excel / PDF / Word / טקסט) או הזן קישור לאתר ספק.
-          המערכת תחלץ את השירותים לטבלה מובנית.
+          העלה קובץ, הזן קישור, או הדבק טקסט. השירותים מחולצים אוטומטית
+          ונדחפים ל-Google Sheet לבדיקה לפני סנכרון למרקטפלייס.
         </p>
       </div>
 
@@ -150,7 +216,7 @@ export default function ExtractPage() {
               const f = e.target.files?.[0]
               if (f) submitFile(f)
             }}
-            disabled={state.kind === 'extracting'}
+            disabled={busy}
             className="block w-full text-sm text-gray-600
               file:mr-3 file:py-2 file:px-4
               file:rounded-lg file:border-0
@@ -180,12 +246,12 @@ export default function ExtractPage() {
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://example.com/services"
             dir="ltr"
-            disabled={state.kind === 'extracting'}
+            disabled={busy}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50"
           />
           <button
             type="submit"
-            disabled={state.kind === 'extracting' || !url.trim()}
+            disabled={busy || !url.trim()}
             className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             חלץ מהקישור
@@ -205,13 +271,13 @@ export default function ExtractPage() {
             value={pastedText}
             onChange={(e) => setPastedText(e.target.value)}
             placeholder="הדבק כאן רשימת שירותים מאימייל / WhatsApp / מסמך — בכל פורמט."
-            disabled={state.kind === 'extracting'}
+            disabled={busy}
             rows={4}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50 resize-none"
           />
           <button
             type="submit"
-            disabled={state.kind === 'extracting' || !pastedText.trim()}
+            disabled={busy || !pastedText.trim()}
             className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             חלץ מהטקסט
@@ -227,7 +293,19 @@ export default function ExtractPage() {
             <p className="font-medium text-blue-900">מחלץ נתונים…</p>
             <p className="text-sm text-blue-700">{state.label}</p>
             <p className="text-xs text-blue-600 mt-1">
-              קבצים גדולים יכולים לקחת עד דקה. אל תרענן את הדף.
+              קבצים מורכבים (PDF עם הרבה שירותים) יכולים לקחת עד 2 דקות.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {state.kind === 'pushing' && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center gap-3">
+          <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+          <div>
+            <p className="font-medium text-blue-900">דוחף ל-Google Sheet…</p>
+            <p className="text-sm text-blue-700">
+              {state.rows_count} שורות מתוך: {state.label}
             </p>
           </div>
         </div>
@@ -237,7 +315,9 @@ export default function ExtractPage() {
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-medium text-red-900">שגיאה בחילוץ</p>
+            <p className="font-medium text-red-900">
+              {state.stage === 'extraction' ? 'שגיאה בחילוץ' : 'שגיאה בדחיפה ל-Sheet'}
+            </p>
             <p className="text-sm text-red-700 mt-1 font-mono break-all">
               {state.message}
             </p>
@@ -245,72 +325,79 @@ export default function ExtractPage() {
         </div>
       )}
 
-      {state.kind === 'success' && Array.isArray(state.rows) && (
-        <div className="space-y-3">
-          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-start gap-3">
-            <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+      {state.kind === 'success' && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-3">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="w-6 h-6 text-emerald-600 flex-shrink-0" />
             <div className="flex-1">
-              <p className="font-medium text-emerald-900">
-                חולצו {state.rows.length} שירותים מתוך: {state.source_label}
+              <p className="font-semibold text-emerald-900 text-lg">
+                ✓ {state.rows_count} שירותים נדחפו ל-Sheet
               </p>
               <p className="text-sm text-emerald-700 mt-1">
-                ⚠️ שלב הדחיפה ל-Google Sheet עוד לא מוכן. בינתיים זוהי תצוגה
-                מקדימה — בודק שהחילוץ עובד נכון.
+                מקור: {state.source_label}
+                {state.avg_confidence != null && (
+                  <span className="mr-2">
+                    · ביטחון ממוצע: {state.avg_confidence.toFixed(1)}/5
+                  </span>
+                )}
               </p>
             </div>
           </div>
+          <div className="flex gap-3">
+            <a
+              href={state.sheet_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition"
+            >
+              פתח ב-Google Sheets
+              <ExternalLink className="w-4 h-4" />
+            </a>
+            <button
+              type="button"
+              onClick={() => setState({ kind: 'idle' })}
+              className="text-sm text-emerald-700 hover:text-emerald-900 px-3 py-2"
+            >
+              חלץ עוד אחד
+            </button>
+          </div>
+          <p className="text-xs text-emerald-700">
+            השורות ב-Sheet ב-status &quot;pending&quot;. בדוק / ערוך אותן שם,
+            ואז סמן כ-&quot;approved&quot; כדי שהן יסונכרנו למרקטפלייס.
+          </p>
+        </div>
+      )}
 
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    {VISIBLE_COLS.map((col) => (
-                      <th
-                        key={col}
-                        className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap"
-                      >
-                        {COL_LABELS_HE[col] || col}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {state.rows.map((row, i) => (
-                    <tr
-                      key={i}
-                      className="border-b border-gray-100 last:border-0 hover:bg-gray-50"
-                    >
-                      {VISIBLE_COLS.map((col) => {
-                        const v = row[col]
-                        return (
-                          <td
-                            key={col}
-                            className="px-3 py-2 text-gray-800 max-w-xs truncate"
-                            title={v == null ? '' : String(v)}
-                          >
-                            {v == null || v === '' ? (
-                              <span className="text-gray-300">—</span>
-                            ) : (
-                              String(v)
-                            )}
-                          </td>
-                        )
-                      })}
-                    </tr>
+      {state.kind === 'extracted_no_sheets' && (
+        <div className="space-y-3">
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-6 h-6 text-amber-600 flex-shrink-0" />
+              <div>
+                <p className="font-semibold text-amber-900">
+                  ✓ חולצו {state.rows.length} שירותים, אבל Google Sheets לא מוגדר עדיין
+                </p>
+                <p className="text-sm text-amber-700 mt-1">
+                  כדי לדחוף שורות אוטומטית, צריך להוסיף ל-.env.local:
+                </p>
+                <ul className="text-xs font-mono text-amber-800 mt-2 space-y-0.5">
+                  {state.setup_required.map((e) => (
+                    <li key={e}>· {e}</li>
                   ))}
-                </tbody>
-              </table>
+                </ul>
+                <p className="text-sm text-amber-700 mt-2">
+                  בקש מקלוד הוראות הגדרה — &quot;תן לי את שלבי ההגדרה של Google Sheets&quot;.
+                </p>
+              </div>
             </div>
           </div>
-
           <details className="bg-white border border-gray-200 rounded-xl p-4">
             <summary className="text-sm text-gray-600 cursor-pointer">
-              הצג JSON גולמי ({CATALOG_COLUMNS.length} שדות לשורה)
+              הצג {state.rows.length} שורות שחולצו (JSON)
             </summary>
             <pre
               dir="ltr"
-              className="mt-3 text-xs text-gray-700 overflow-x-auto whitespace-pre"
+              className="mt-3 text-xs text-gray-700 overflow-x-auto whitespace-pre max-h-96"
             >
               {JSON.stringify(state.rows, null, 2)}
             </pre>
