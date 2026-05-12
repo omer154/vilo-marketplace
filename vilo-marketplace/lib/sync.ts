@@ -144,14 +144,14 @@ function slugify(s: string): string {
 
 async function findOrCreateSupplier(
   supabase: SupabaseClient,
-  row: StagingRow
+  row: StagingRow,
+  schemaColumns: { suppliers: Set<string> }
 ): Promise<{ id: string; created: boolean } | { error: string }> {
   if (!row.supplier_name) {
     return { error: 'row has no supplier_name' }
   }
   const name = row.supplier_name.trim()
 
-  // Try to find an existing supplier by exact name match.
   const { data: existing, error: findErr } = await supabase
     .from('suppliers')
     .select('id')
@@ -162,17 +162,24 @@ async function findOrCreateSupplier(
   if (findErr) return { error: `supplier lookup failed: ${findErr.message}` }
   if (existing) return { id: existing.id, created: false }
 
-  // No match — create a new supplier.
+  // Build payload using only columns the DB actually has — keeps the sync
+  // working when a migration column hasn't landed yet.
   const newSlug = slugify(name) || `supplier-${Date.now()}`
+  const payload: Record<string, unknown> = {
+    name,
+    slug: newSlug,
+    is_active: true,
+  }
+  if (schemaColumns.suppliers.has('name_en') && row.supplier_name_en) {
+    payload.name_en = row.supplier_name_en
+  }
+  if (schemaColumns.suppliers.has('website') && row.supplier_website) {
+    payload.website = row.supplier_website
+  }
+
   const { data: created, error: createErr } = await supabase
     .from('suppliers')
-    .insert({
-      name,
-      slug: newSlug,
-      name_en: row.supplier_name_en,
-      website: row.supplier_website,
-      is_active: true,
-    })
+    .insert(payload)
     .select('id')
     .single()
 
@@ -188,7 +195,8 @@ async function upsertOneRow(
   supabase: SupabaseClient,
   row: StagingRow,
   supplierId: string,
-  categorySlug: CategorySlug
+  categorySlug: CategorySlug,
+  schemaColumns: { services: Set<string> }
 ): Promise<'inserted' | 'updated' | { error: string }> {
   const durationMinutes =
     row.duration_hours != null ? Math.round(row.duration_hours * 60) : null
@@ -200,44 +208,92 @@ async function upsertOneRow(
       : row.location_mode === 'hybrid'
       ? 'both'
       : row.location_mode === 'at_provider'
-      ? 'onsite' // best-effort legacy mapping; staging row carries the real value via location_mode
+      ? 'onsite'
       : null
 
-  const payload = {
+  const has = (col: string) => schemaColumns.services.has(col)
+
+  // Always-present columns from migration 001.
+  const payload: Record<string, unknown> = {
     supplier_id: supplierId,
     service_name: row.service_name || '',
     category_primary: categorySlug,
-    category_secondary: row.supplier_category, // keep verbatim Hebrew for UX
+    category_secondary: row.supplier_category,
     description_short: row.service_description?.slice(0, 200) || null,
-    service_description: row.service_description,
     price: row.price_ils,
-    price_type: row.price_type,
-    price_min: row.price_min,
-    price_max: row.price_max,
-    pricing_unit: null, // future: derive from supplier_notes
     min_participants: row.capacity_min,
     max_participants: row.capacity_max,
     duration_minutes: durationMinutes,
-    location_mode: row.location_mode,
     location_type: legacyLocation,
     language: 'he',
     notes: row.supplier_notes,
-    staging_row_id: row._row_id,
     is_active: true,
   }
 
-  // Composite-key upsert. Migration 002 created services_tier_unique on
-  // (supplier_id, service_name, COALESCE(min_participants,-1), COALESCE(max_participants,-1)).
+  // Migration-002 columns — only set if the DB has them.
+  if (has('service_description')) payload.service_description = row.service_description
+  if (has('price_type')) payload.price_type = row.price_type
+  if (has('price_min')) payload.price_min = row.price_min
+  if (has('price_max')) payload.price_max = row.price_max
+  if (has('location_mode')) payload.location_mode = row.location_mode
+  if (has('staging_row_id')) payload.staging_row_id = row._row_id
+
   const { error } = await supabase.from('services').upsert(payload, {
     onConflict: 'supplier_id,service_name,min_participants,max_participants',
   })
 
   if (error) return { error: `upsert failed: ${error.message}` }
-
-  // upsert doesn't tell us insert vs update; we don't strictly need to
-  // distinguish. Treat as inserted for the stats — it's a close
-  // approximation good enough for the UI.
   return 'inserted'
+}
+
+/** Discover what columns exist on suppliers + services. PostgREST doesn't
+ *  expose information_schema, so we use `select *` on one existing row —
+ *  the returned object has all the actual column names as keys. Both
+ *  tables have rows from the original seed, so this is cheap + reliable. */
+async function readSchemaColumns(
+  supabase: SupabaseClient
+): Promise<{ suppliers: Set<string>; services: Set<string> }> {
+  const [suppRes, svcRes] = await Promise.all([
+    supabase.from('suppliers').select('*').limit(1),
+    supabase.from('services').select('*').limit(1),
+  ])
+
+  const suppliers = new Set<string>(
+    suppRes.data && suppRes.data[0] ? Object.keys(suppRes.data[0]) : []
+  )
+  const services = new Set<string>(
+    svcRes.data && svcRes.data[0] ? Object.keys(svcRes.data[0]) : []
+  )
+
+  // Suppliers might genuinely be empty on a fresh install. Fall back to the
+  // conservative migration-001 column set.
+  if (suppliers.size === 0) {
+    console.warn('[sync] suppliers had no rows — falling back to mig-001 columns')
+    ;['name', 'slug', 'logo_url', 'contact_email', 'description_short', 'is_active'].forEach(
+      (c) => suppliers.add(c)
+    )
+  }
+  if (services.size === 0) {
+    console.warn('[sync] services had no rows — falling back to mig-001 columns')
+    ;[
+      'supplier_id',
+      'service_name',
+      'category_primary',
+      'category_secondary',
+      'description_short',
+      'min_participants',
+      'max_participants',
+      'duration_minutes',
+      'price',
+      'pricing_unit',
+      'notes',
+      'is_active',
+      'language',
+      'location_type',
+    ].forEach((c) => services.add(c))
+  }
+
+  return { suppliers, services }
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────
@@ -260,6 +316,13 @@ export async function syncApprovedRows(): Promise<SyncStats> {
   }
 
   if (rows.length === 0) return stats
+
+  // Discover what columns actually exist before writing anything. Avoids
+  // hitting "column not found" 36 times when a migration hasn't fully run.
+  const schemaColumns = await readSchemaColumns(supabase)
+  console.log(
+    `[sync] schema: suppliers has ${schemaColumns.suppliers.size} cols, services has ${schemaColumns.services.size} cols`
+  )
 
   // Build the category mapping once per batch — one Claude call total.
   const categoryStrings = rows
@@ -303,7 +366,7 @@ export async function syncApprovedRows(): Promise<SyncStats> {
 
     let supplierId = supplierCache.get(row.supplier_name)
     if (!supplierId) {
-      const result = await findOrCreateSupplier(supabase, row)
+      const result = await findOrCreateSupplier(supabase, row, schemaColumns)
       if ('error' in result) {
         recordFailure(result.error)
         continue
@@ -316,7 +379,13 @@ export async function syncApprovedRows(): Promise<SyncStats> {
       ? categoryMap[row.supplier_category] || 'consulting'
       : 'consulting'
 
-    const upsertResult = await upsertOneRow(supabase, row, supplierId, slug)
+    const upsertResult = await upsertOneRow(
+      supabase,
+      row,
+      supplierId,
+      slug,
+      schemaColumns
+    )
     if (typeof upsertResult === 'object' && 'error' in upsertResult) {
       recordFailure(upsertResult.error)
       continue
