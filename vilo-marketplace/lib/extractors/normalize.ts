@@ -136,15 +136,48 @@ async function normalizeOne(
   source: ExtractedSource,
   rowsChunk?: Record<string, unknown>[]
 ): Promise<CatalogRow[]> {
-  let userContent = `מקור: ${source.source_label} (סוג: ${source.source_type})\n\n`
+  // Build content blocks. For PDFs we send the raw buffer as a `document`
+  // block — Claude reads it natively (text, tables, images). For
+  // everything else we paste structured rows or raw text.
+  type AnthropicContent =
+    | { type: 'text'; text: string }
+    | {
+        type: 'document'
+        source: { type: 'base64'; media_type: 'application/pdf'; data: string }
+      }
 
-  if (rowsChunk && rowsChunk.length) {
-    userContent += `שורות מובנות מהמקור (${rowsChunk.length} שורות):\n`
-    userContent += JSON.stringify(rowsChunk, null, 2)
+  const messageContent: AnthropicContent[] = []
+  const header = `מקור: ${source.source_label} (סוג: ${source.source_type})`
+
+  if (source.pdf_buffer) {
+    messageContent.push({
+      type: 'document',
+      source: {
+        type: 'base64',
+        media_type: 'application/pdf',
+        data: source.pdf_buffer.toString('base64'),
+      },
+    })
+    messageContent.push({
+      type: 'text',
+      text:
+        `${header}\n\nקרא את ה-PDF המצורף וחלץ ממנו את כל השירותים.\n` +
+        `שמור על הטקסט בעברית כפי שהוא מופיע. אם יש מדרגות תמחור — צור שורה לכל מדרגה.`,
+    })
+  } else if (rowsChunk && rowsChunk.length) {
+    messageContent.push({
+      type: 'text',
+      text:
+        `${header}\n\nשורות מובנות מהמקור (${rowsChunk.length} שורות):\n` +
+        JSON.stringify(rowsChunk, null, 2),
+    })
   } else if (source.raw_text) {
-    userContent += `טקסט גולמי:\n${source.raw_text.slice(0, 80_000)}`
+    messageContent.push({
+      type: 'text',
+      text: `${header}\n\nטקסט גולמי:\n${source.raw_text.slice(0, 80_000)}`,
+    })
   } else {
-    throw new Error('Extractor produced no rows and no raw_text')
+    throw new Error('Extractor produced no rows, no raw_text, and no pdf_buffer')
   }
 
   // Cap output at 7K to stay under the 8K-tokens-per-minute tier cap on a
@@ -165,7 +198,8 @@ async function normalizeOne(
         },
       ],
       tool_choice: { type: 'tool', name: 'submit_catalog_rows' },
-      messages: [{ role: 'user', content: userContent }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      messages: [{ role: 'user', content: messageContent as any }],
     })
   )
 

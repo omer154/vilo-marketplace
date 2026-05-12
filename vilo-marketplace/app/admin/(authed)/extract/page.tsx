@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, FormEvent } from 'react'
-import { Upload, Link2, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { Upload, Link2, FileText, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
 import type { CatalogRow } from '@/lib/extractors/types'
 import { CATALOG_COLUMNS } from '@/lib/extractors/types'
 
@@ -42,6 +42,7 @@ const VISIBLE_COLS: (keyof CatalogRow)[] = [
 export default function ExtractPage() {
   const [state, setState] = useState<ResultState>({ kind: 'idle' })
   const [url, setUrl] = useState('')
+  const [pastedText, setPastedText] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleResponse = async (
@@ -103,6 +104,27 @@ export default function ExtractPage() {
     }
   }
 
+  const submitText = async (e: FormEvent) => {
+    e.preventDefault()
+    const trimmed = pastedText.trim()
+    if (!trimmed) return
+    const label = 'טקסט שהודבק'
+    setState({ kind: 'extracting', label })
+    try {
+      const res = await fetch('/api/admin/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: trimmed, label }),
+      })
+      setState(await handleResponse(res, label))
+    } catch (err) {
+      setState({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'unknown error',
+      })
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -113,7 +135,7 @@ export default function ExtractPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* File upload */}
         <div className="bg-white border border-gray-200 rounded-xl p-5">
           <div className="flex items-center gap-2 mb-3">
@@ -167,6 +189,32 @@ export default function ExtractPage() {
             className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             חלץ מהקישור
+          </button>
+        </form>
+
+        {/* Pasted text */}
+        <form
+          onSubmit={submitText}
+          className="bg-white border border-gray-200 rounded-xl p-5"
+        >
+          <div className="flex items-center gap-2 mb-3">
+            <FileText className="w-5 h-5 text-gray-700" />
+            <h2 className="font-medium text-gray-900">הדבק טקסט</h2>
+          </div>
+          <textarea
+            value={pastedText}
+            onChange={(e) => setPastedText(e.target.value)}
+            placeholder="הדבק כאן רשימת שירותים מאימייל / WhatsApp / מסמך — בכל פורמט."
+            disabled={state.kind === 'extracting'}
+            rows={4}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50 resize-none"
+          />
+          <button
+            type="submit"
+            disabled={state.kind === 'extracting' || !pastedText.trim()}
+            className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            חלץ מהטקסט
           </button>
         </form>
       </div>

@@ -52,6 +52,9 @@ export interface ExtractedSource {
   source_label: string
   /** If the source already has tabular rows (Excel/CSV), pass them through */
   rows?: Record<string, unknown>[]
-  /** Free text for the LLM to read (PDF/Word/URL/text) */
+  /** Free text for the LLM to read (Word/URL/text/Excel fallback) */
   raw_text?: string
+  /** Raw PDF buffer — sent directly to Claude as a document content block.
+   *  Avoids a separate parsing step; Claude handles vision + text natively. */
+  pdf_buffer?: Buffer
 }

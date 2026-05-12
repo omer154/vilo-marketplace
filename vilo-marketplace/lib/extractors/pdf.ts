@@ -1,19 +1,18 @@
 import type { ExtractedSource } from './types'
 
-// pdf-parse has no exported types in some versions; use a loose import.
-// Lazy require so the dep is only loaded when this extractor runs.
-type PdfParse = (buf: Buffer) => Promise<{ text: string; numpages: number }>
-
-export async function extractPdf(
+/**
+ * Pass the PDF buffer straight through to the normalizer. Anthropic's
+ * Messages API accepts PDFs as `{ type: 'document' }` content blocks on
+ * Sonnet 4.6 and handles text, images, and tables natively — no separate
+ * parsing library needed. Replaces the brittle pdf-parse dependency.
+ */
+export function extractPdf(
   buffer: Buffer,
   label: string
-): Promise<ExtractedSource> {
-  const mod = await import('pdf-parse')
-  const pdfParse = (mod.default || mod) as unknown as PdfParse
-  const result = await pdfParse(buffer)
+): ExtractedSource {
   return {
     source_type: 'pdf',
     source_label: label,
-    raw_text: result.text.trim(),
+    pdf_buffer: buffer,
   }
 }
