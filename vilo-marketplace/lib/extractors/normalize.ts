@@ -110,6 +110,27 @@ const TOOL_INPUT_SCHEMA = {
   required: ['rows'],
 }
 
+/** Wait `ms` milliseconds. */
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Retry an async fn once on Anthropic 429. Waits for the suggested retry
+ *  window or 65s, whichever is shorter. */
+async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    const e = err as { status?: number; headers?: Record<string, string> }
+    if (e?.status !== 429) throw err
+    const retryAfter = Number(e.headers?.['retry-after']) || 60
+    const waitMs = Math.min(retryAfter * 1000 + 1000, 65_000)
+    console.warn(`Anthropic 429 — sleeping ${waitMs}ms then retrying once.`)
+    await sleep(waitMs)
+    return await fn()
+  }
+}
+
 async function normalizeOne(
   client: Anthropic,
   source: ExtractedSource,
@@ -126,38 +147,48 @@ async function normalizeOne(
     throw new Error('Extractor produced no rows and no raw_text')
   }
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 16_384,
-    system: SYSTEM_PROMPT,
-    tools: [
-      {
-        name: 'submit_catalog_rows',
-        description:
-          'Submit the extracted catalog rows. One row per service, per pricing tier.',
-        input_schema: TOOL_INPUT_SCHEMA,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'submit_catalog_rows' },
-    messages: [{ role: 'user', content: userContent }],
-  })
+  // Cap output at 7K to stay under the 8K-tokens-per-minute tier cap on a
+  // single call. Real-world supplier PDFs (5-30 services) fit easily.
+  // For very large unstructured inputs, the user will see a clear
+  // "max_tokens — split the file" error instead of a silent truncation.
+  const response = await withRateLimitRetry(() =>
+    client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 7000,
+      system: SYSTEM_PROMPT,
+      tools: [
+        {
+          name: 'submit_catalog_rows',
+          description:
+            'Submit the extracted catalog rows. One row per service, per pricing tier.',
+          input_schema: TOOL_INPUT_SCHEMA,
+        },
+      ],
+      tool_choice: { type: 'tool', name: 'submit_catalog_rows' },
+      messages: [{ role: 'user', content: userContent }],
+    })
+  )
 
   if (response.stop_reason === 'max_tokens') {
     console.warn(
-      `Claude hit max_tokens on chunk (${rowsChunk?.length ?? '?'} input rows). Output likely truncated.`
+      `Claude hit max_tokens. input rows=${rowsChunk?.length ?? 'n/a'}, raw_text chars=${source.raw_text?.length ?? 'n/a'}.`
     )
   }
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
     throw new Error(
-      `Claude did not return tool use. stop_reason=${response.stop_reason}`
+      `Claude returned no structured output. stop_reason=${response.stop_reason}. ` +
+        (response.stop_reason === 'max_tokens'
+          ? 'הקובץ גדול מדי לחילוץ במהלך אחד. נסה לפצל אותו לקובץ קטן יותר (לדוגמה, ספק אחד בכל קובץ).'
+          : 'נסה שוב.')
     )
   }
   const input = toolUse.input as { rows?: CatalogRow[] }
   if (!Array.isArray(input.rows)) {
     throw new Error(
-      `Claude tool input has no rows array. stop_reason=${response.stop_reason}. Likely max_tokens — increase CHUNK_SIZE smaller or max_tokens larger.`
+      `התשובה מקלוד הייתה ריקה. stop_reason=${response.stop_reason}. ` +
+        'סביר להניח שהמסמך גדול מדי — פצל אותו לקבצים קטנים יותר.'
     )
   }
   return input.rows
