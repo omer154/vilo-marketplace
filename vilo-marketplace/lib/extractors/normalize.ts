@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import type { CatalogRow, ExtractedSource } from './types'
 import { CATALOG_COLUMNS } from './types'
 import { inferSourceSchema, applySchemaToRows } from './schema-mapper'
+import { multipassPdf } from './multipass'
 
 /**
  * Above this row count, structured sources (Excel/CSV) take the fast path:
@@ -245,6 +246,13 @@ export async function normalizeWithClaude(
   if (!apiKey) throw new Error('Missing VILO_ANTHROPIC_KEY')
 
   const client = new Anthropic({ apiKey })
+
+  // Multipass for PDFs — outline scan + per-service expansion, ~1-2K
+  // tokens output per call. Sidesteps both max_tokens truncation and
+  // per-minute rate limits on messy docs (10+ pages, many pricing tiers).
+  if (source.pdf_buffer) {
+    return multipassPdf(client, source.pdf_buffer, source.source_label)
+  }
 
   // Fast path: structured input with consistent columns. One LLM call to
   // learn the schema, then pure-JS row transformation. Avoids per-row

@@ -1,4 +1,13 @@
 /**
+ * Per-field confidence on a scale of 1-5.
+ *   5 = directly read from a labeled cell / explicit value
+ *   3 = inferred reasonably
+ *   1 = guessed, almost certainly needs review
+ * Surfaced in the Sheet so a human can spot-check low-confidence rows fast.
+ */
+export type ConfidenceScore = 1 | 2 | 3 | 4 | 5
+
+/**
  * Canonical shape of a row in the master catalog.
  * Every extractor — Excel, PDF, Word, URL, free text — normalizes to this.
  * The Google Sheets staging tab + the DB sync both speak this vocabulary.
@@ -22,6 +31,10 @@ export interface CatalogRow {
   location: 'offsite' | 'onsite' | 'flexible' | 'remote' | null
   tags: string | null
   supplier_notes: string | null
+  /** Average confidence across populated fields, 1-5. Computed at merge time. */
+  _confidence_avg?: ConfidenceScore
+  /** Per-field confidence map. Only fields the extractor scored are included. */
+  _confidence?: Partial<Record<keyof Omit<CatalogRow, '_confidence' | '_confidence_avg'>, ConfidenceScore>>
 }
 
 export const CATALOG_COLUMNS: (keyof CatalogRow)[] = [
