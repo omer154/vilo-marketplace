@@ -1,6 +1,14 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { CatalogRow, ExtractedSource } from './types'
 import { CATALOG_COLUMNS } from './types'
+import { inferSourceSchema, applySchemaToRows } from './schema-mapper'
+
+/**
+ * Above this row count, structured sources (Excel/CSV) take the fast path:
+ * one LLM call to infer the column mapping, then pure JS to transform all
+ * rows. Below this, the per-row LLM call is faster than two round trips.
+ */
+const STRUCTURED_FAST_PATH_THRESHOLD = 10
 
 const CATEGORY_VALUES = [
   'wellbeing',
@@ -168,6 +176,22 @@ export async function normalizeWithClaude(
 
   const client = new Anthropic({ apiKey })
 
+  // Fast path: structured input with consistent columns. One LLM call to
+  // learn the schema, then pure-JS row transformation. Avoids per-row
+  // token spend that trips low-tier rate limits at scale.
+  if (source.rows && source.rows.length >= STRUCTURED_FAST_PATH_THRESHOLD) {
+    const headers = Object.keys(source.rows[0] ?? {})
+    const schema = await inferSourceSchema(
+      client,
+      headers,
+      source.rows,
+      source.source_label
+    )
+    return applySchemaToRows(source.rows, schema)
+  }
+
+  // Slow path: free text OR a small number of structured rows (likely a
+  // sample where the per-row cost is small enough). Chunk + parallelize.
   if (source.rows && source.rows.length > CHUNK_SIZE) {
     const chunks: Record<string, unknown>[][] = []
     for (let i = 0; i < source.rows.length; i += CHUNK_SIZE) {
