@@ -33,25 +33,40 @@ const OUTLINE_MAX_TOKENS = 4096
 
 interface ServiceStub {
   service_name: string
-  page_number: number      // 1-indexed
-  section_header: string | null
-  preview: string | null   // short snippet to help the expand call
-  expected_row_count: number // how many pricing-tier rows we expect Pass B to return
+  page_number: number       // 1-indexed
+  section_index: number     // points into outline.sections[]
+  preview: string | null
+  expected_row_count: number
 }
 
-const OUTLINE_SYSTEM = `אתה סורק מסמכי ספקים של Vilo Marketplace ומחזיר רשימת שירותים.
+interface DocOutline {
+  sections: string[]        // ordered, verbatim, distinct section headers from the PDF
+  stubs: ServiceStub[]
+}
 
-הוראות:
-- החזר כל שירות שמופיע במסמך, כולל גרסאות שונות של אותו שירות (למשל "ייעוץ פרטני" ו"ייעוץ קבוצתי" הם שני שירותים).
-- אל תיצור שורות נפרדות לכל מדרגת תמחור — זה נעשה בשלב הבא. שורה אחת לכל שירות (אפילו אם יש לו 5 רמות מחיר).
-- page_number = העמוד שבו השירות מתחיל (1-indexed).
-- section_header = הכותרת/הקטגוריה שמעליו במסמך (לדוגמה "פעילות לזוגות", "מתנות לעובדים"). חובה להחזיר את הכותרת בדיוק כפי שהיא במסמך, ללא ניסוח מחדש.
-- preview = משפט אחד שמתאר את השירות — יעזור לזיהוי בשלב הבא.
-- expected_row_count = כמה שורות שלב הבא צפוי להחזיר עבור השירות הזה. ספור את מדרגות התמחור/הוואריאציות הנפרדות:
-    * שירות פשוט עם מחיר אחד = 1
-    * שירות עם 6 רמות מחיר (לדוגמה 3 מדרגות בקליניקה + 3 במקום העבודה) = 6
-    * "בשבילנו" עם מפגש בודד וסדרה = 2
-  אם השירות מפנה לתמחיר של שירות אחר ("ראה תמחור X"), ספור את אותן הוואריאציות.`
+const OUTLINE_SYSTEM = `אתה סורק מסמך ספק של Vilo Marketplace ומפיק שני פלטים:
+
+1. sections: רשימה מסודרת של כל כותרות הסקציות במסמך, כפי שהן מופיעות בדיוק.
+   - שמור על הטקסט verbatim — בלי לערוך, בלי להוסיף, בלי לקצר.
+   - כל סקציה מופיעה פעם אחת בלבד, גם אם יש בה כמה שירותים.
+   - דוגמה למסמך טיפוסי: ["מתנות לעובדים", "פעילות לזוגות", "פעילות להורים לילדים צעירים", "פעילות להורים למתבגרים (גלאי 12-18)", "פעילות לצוותים/ לעובדים"]
+
+2. stubs: רשימה של השירותים במסמך. כל stub:
+   - service_name: שם השירות כפי שמופיע במסמך
+   - page_number: העמוד שבו השירות מתחיל (1-indexed)
+   - section_index: index לתוך sections[] (0-based). זו הקטגוריה של השירות הזה.
+   - preview: משפט אחד שמתאר את השירות
+   - expected_row_count: כמה שורות שלב הבא צפוי להחזיר. ספור מדרגות תמחור / וריאציות נפרדות:
+       * מחיר אחד = 1
+       * 6 רמות (3 בקליניקה + 3 במקום העבודה) = 6
+       * "בשבילנו" עם מפגש בודד וסדרה = 2
+       * אם השירות אומר "ראה תמחור X" → ספור את אותן וריאציות
+
+כללים קריטיים:
+- אל תיצור שורות נפרדות פר מדרגת תמחור — זה לשלב הבא. שירות אחד = stub אחד.
+- אל תמציא כותרות סקציה. אם השם בדיוק "מתנות לעובדים" — תחזיר אותו כך, לא "פעילויות לרווחת עובדים".
+- כל stub חייב לקבל section_index. אם השירות מופיע באותה סקציה כמו שירות אחר — חייבים אותו section_index.
+- שירותים עם אותו שם בסקציות שונות (למשל "יעוץ פרטני להורים" גם בסקציית הילדים הצעירים וגם בסקציית המתבגרים) הם stubs נפרדים עם section_index שונים.`
 
 const EXPAND_SYSTEM = `אתה מחלץ פרטים מלאים של שירות בודד מתוך מסמך ספק.
 
@@ -64,16 +79,22 @@ const EXPAND_SYSTEM = `אתה מחלץ פרטים מלאים של שירות ב�
 - שמור טקסט בעברית verbatim. אל תתרגם.
 - price_type: 'fixed' למחיר בודד, 'range' לטווח, 'on_request' אם אין מחיר ספציפי.
 
-שדה location_mode — חובה לדייק:
+שדה location_mode — חובה למלא בכל שורה. אל תחזיר null אלא אם באמת אין שום רמז:
 - at_provider = במתחם של הספק (קליניקה / סטודיו / מתקן של הספק)
 - at_client = במשרד / במתחם של הלקוח (עובדי הארגון)
 - remote = מקוון (זום וכו')
 - hybrid = יכול להתקיים בשתיהן, לפי בחירה
 
-דוגמאות:
-- "בקליניקה שלי" / "בקליניקה בגבעת שמואל" → at_provider
-- "במקום העבודה" / "בחצרי הלקוח" → at_client
-- שיעור יוגה אצל הספק או אצל הלקוח, גמיש → hybrid
+דוגמאות (חובה לעקוב!):
+- "בקליניקה שלי" / "בקליניקה בגבעת שמואל" / "בקליניקה" → at_provider
+- "במקום העבודה" / "במשרד" / "בחצרי הלקוח" / "אצל הלקוח" → at_client
+- שורה שמדברת על "מפגש בודד" בלי ציון מקום, אבל יש לה שורה אחרת מפורשת על "במקום העבודה" — אז הראשונה היא at_provider (ברירת המחדל לעובדה הזו).
+- הרצאה לעובדים שלא ציינו איפה — בדרך כלל at_client (המרצה מגיע למקום העבודה).
+- שיעור עם שני מחירים, אחד "אצל הספק" ואחד "אצל הלקוח" → שתי שורות נפרדות, אחת at_provider ואחת at_client.
+- "ניתן לקיים אצלכם או אצלנו" → hybrid
+- "בזום" / "מקוון" / "אונליין" → remote
+
+חובה: 95% מהשורות חייבות location_mode לא-null. null זה רק כשבאמת אין שום מידע מהקשר.
 
 - supplier_notes: כל מידע שלא נכנס לשדות אחרים — מע"מ, נסיעות, יחידת תמחור, תיאור התמחיר.
 - confidence (לכל שדה): 5 = קראתי בדיוק מהמסמך, 3 = הסקתי הגיוני, 1 = ניחוש.`
@@ -143,7 +164,7 @@ async function outlineScanPdf(
   client: Anthropic,
   pdfBuffer: Buffer,
   label: string
-): Promise<ServiceStub[]> {
+): Promise<DocOutline> {
   const response = await withRateLimitRetry(
     () =>
       client.messages.create({
@@ -153,10 +174,17 @@ async function outlineScanPdf(
         tools: [
           {
             name: 'submit_outline',
-            description: 'Submit the list of distinct services found in the document.',
+            description:
+              'Submit the sections and stubs found in the document. Sections is the canonical list of section headers; each stub references one section by index.',
             input_schema: {
               type: 'object',
               properties: {
+                sections: {
+                  type: 'array',
+                  description:
+                    'Ordered list of distinct section headers in the document, verbatim.',
+                  items: { type: 'string' },
+                },
                 stubs: {
                   type: 'array',
                   items: {
@@ -164,19 +192,24 @@ async function outlineScanPdf(
                     properties: {
                       service_name: { type: 'string' },
                       page_number: { type: 'integer' },
-                      section_header: { type: ['string', 'null'] },
+                      section_index: {
+                        type: 'integer',
+                        description:
+                          '0-based index into sections[]. The section this service belongs to.',
+                      },
                       preview: { type: ['string', 'null'] },
                       expected_row_count: { type: 'integer' },
                     },
                     required: [
                       'service_name',
                       'page_number',
+                      'section_index',
                       'expected_row_count',
                     ],
                   },
                 },
               },
-              required: ['stubs'],
+              required: ['sections', 'stubs'],
             },
           },
         ],
@@ -210,18 +243,32 @@ async function outlineScanPdf(
   if (!toolUse || toolUse.type !== 'tool_use') {
     throw new Error(`Outline scan: no tool use. stop_reason=${response.stop_reason}`)
   }
-  const input = toolUse.input as { stubs?: ServiceStub[] }
-  if (!Array.isArray(input.stubs)) {
-    throw new Error('Outline scan returned no stubs array.')
+  const input = toolUse.input as {
+    sections?: string[]
+    stubs?: ServiceStub[]
   }
-  // Default expected_row_count to 1 if the model omitted it.
-  return input.stubs.map((s) => ({
+  if (!Array.isArray(input.sections) || !Array.isArray(input.stubs)) {
+    throw new Error('Outline scan returned malformed { sections, stubs }.')
+  }
+  const sections = input.sections
+  // Default expected_row_count to 1 if omitted. Clamp section_index to range.
+  const stubs = input.stubs.map((s) => ({
     ...s,
+    section_index:
+      typeof s.section_index === 'number' &&
+      s.section_index >= 0 &&
+      s.section_index < sections.length
+        ? s.section_index
+        : 0,
     expected_row_count:
       typeof s.expected_row_count === 'number' && s.expected_row_count > 0
         ? s.expected_row_count
         : 1,
   }))
+  console.log(
+    `[outline] ${sections.length} sections, ${stubs.length} services`
+  )
+  return { sections, stubs }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -236,6 +283,7 @@ async function expandServiceFromPdf(
   client: Anthropic,
   pdfBuffer: Buffer,
   stub: ServiceStub,
+  sectionHeader: string,
   totalPages: number,
   label: string,
   retryReason: string | null = null
@@ -335,10 +383,11 @@ async function expandServiceFromPdf(
                   `מקור: ${label} (עמודים ${start}-${end})\n\n` +
                   `חלץ את כל המדרגות / הגרסאות של השירות הזה:\n` +
                   `- שם: ${stub.service_name}\n` +
-                  (stub.section_header ? `- קטגוריה: ${stub.section_header}\n` : '') +
+                  `- קטגוריה: ${sectionHeader}\n` +
                   (stub.preview ? `- תיאור: ${stub.preview}\n` : '') +
                   `\nאני מצפה לקבל בדיוק ${stub.expected_row_count} שורה(ות). ` +
                   `כל מדרגת תמחור / וריאציה = שורה נפרדת.` +
+                  `\nחובה למלא location_mode בכל שורה.` +
                   (retryReason ? `\n\nהערה: ${retryReason}` : ''),
               },
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -381,14 +430,20 @@ async function expandWithRetry(
   client: Anthropic,
   pdfBuffer: Buffer,
   stub: ServiceStub,
+  sectionHeader: string,
   totalPages: number,
   label: string
 ): Promise<RowWithConfidence[]> {
-  const first = await expandServiceFromPdf(client, pdfBuffer, stub, totalPages, label)
+  const first = await expandServiceFromPdf(
+    client,
+    pdfBuffer,
+    stub,
+    sectionHeader,
+    totalPages,
+    label
+  )
   const expected = Math.max(1, stub.expected_row_count)
 
-  // If we got at least half of what was promised (or expected=1 and got >=1),
-  // accept. Otherwise retry once with a strong nudge.
   if (first.length >= expected || expected <= 1) {
     return first
   }
@@ -403,6 +458,7 @@ async function expandWithRetry(
     client,
     pdfBuffer,
     stub,
+    sectionHeader,
     totalPages,
     label,
     reason
@@ -427,8 +483,13 @@ function computeConfidenceAvg(
 }
 
 function rowKey(r: CatalogRow): string {
+  // supplier_category included so that same-named services in different
+  // PDF sections (e.g. "יעוץ פרטני להורים" appears in both the young-kids
+  // section and the teens section with identical prices) are NOT collapsed
+  // by dedup.
   return [
     r.supplier_name,
+    r.supplier_category,
     r.service_name,
     r.price_ils,
     r.capacity_min,
@@ -460,17 +521,16 @@ export function mergeAndValidate(rows: RowWithConfidence[]): CatalogRow[] {
 // ──────────────────────────────────────────────────────────────────────
 
 /**
- * Force every row's supplier_category to match the source section header
- * the outline pass found. Keeps categories consistent within a doc — the
- * Excel/Sheet then has one stable label per PDF section, instead of the
- * model inventing fresh phrasings per call.
+ * Force every row's supplier_category to be exactly the doc-level
+ * section header (canonical, verbatim from Pass A's sections[]). The
+ * model can no longer invent per-stub phrasings since it never sees
+ * the header as a string — only as an index into the doc-level list.
  */
-function pinCategoryFromStub(
-  stub: ServiceStub,
-  rows: RowWithConfidence[]
+function pinCategory(
+  rows: RowWithConfidence[],
+  sectionHeader: string
 ): RowWithConfidence[] {
-  if (!stub.section_header) return rows
-  return rows.map((r) => ({ ...r, supplier_category: stub.section_header }))
+  return rows.map((r) => ({ ...r, supplier_category: sectionHeader }))
 }
 
 export async function multipassPdf(
@@ -478,14 +538,22 @@ export async function multipassPdf(
   pdfBuffer: Buffer,
   label: string
 ): Promise<CatalogRow[]> {
-  const stubs = await outlineScanPdf(client, pdfBuffer, label)
-  if (stubs.length === 0) return []
+  const outline = await outlineScanPdf(client, pdfBuffer, label)
+  if (outline.stubs.length === 0) return []
 
   const totalPages = (await PDFDocument.load(pdfBuffer)).getPageCount()
 
-  const expanded = await pMap(stubs, EXPAND_CONCURRENCY, async (stub) => {
-    const rows = await expandWithRetry(client, pdfBuffer, stub, totalPages, label)
-    return pinCategoryFromStub(stub, rows)
+  const expanded = await pMap(outline.stubs, EXPAND_CONCURRENCY, async (stub) => {
+    const sectionHeader = outline.sections[stub.section_index] ?? 'אחר'
+    const rows = await expandWithRetry(
+      client,
+      pdfBuffer,
+      stub,
+      sectionHeader,
+      totalPages,
+      label
+    )
+    return pinCategory(rows, sectionHeader)
   })
 
   return mergeAndValidate(expanded.flat())
