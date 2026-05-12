@@ -1,23 +1,22 @@
 /**
  * Multi-pass extractor for messy unstructured docs (PDFs primarily).
  *
- * The single-call approach fails when a doc describes many services with
- * many pricing tiers each — output blows past max_tokens, or rate limits
- * cap the per-minute output. This module breaks the work into many small
- * Claude calls, each scoped to a single service:
+ * Section-as-unit, not service-as-unit. Three rounds of service-stub
+ * extraction kept losing entire services (Pass A's outline missed them,
+ * so Pass B never saw them). The new flow asks Pass A only for SECTION
+ * BOUNDARIES — header + page range — which are coarse and hard to miss.
+ * Then ONE Pass B call per section extracts every service + every
+ * pricing tier in that page range.
  *
- *   Pass A (outline):   1 call. "What services exist? Give me name + page
- *                        + section header." Tiny output (~1K tokens).
- *   Pass B (expand):    N calls, parallel-capped. For each stub, slice
- *                        the PDF to a ±1-page window and ask Claude to
- *                        emit all pricing-tier rows for that service.
- *                        Each output is small (~1-2K tokens), so rate
- *                        limits stop biting.
- *   Pass C (validate):  pure JS — dedupe near-identical rows, average
- *                        confidence, fill defaults.
+ *   Pass A — outlineSections(): tiny call, ~500 tokens out. Just sections.
+ *   Pass B — expandSection(): one call per section. Sliced PDF, "extract
+ *            every service and every pricing tier in this section."
+ *            Category for all rows is pinned in JS from the canonical
+ *            section header.
+ *   Pass C — mergeAndValidate(): pure JS, dedupe, average confidence.
  *
- * Confidence scoring: every Pass B call also returns a per-field 1-5
- * score so the Sheet can surface red/yellow/green dots for review.
+ * Confidence: every Pass B row carries a per-field 1-5 score so the
+ * Sheet shows red/yellow/green.
  */
 
 import Anthropic from '@anthropic-ai/sdk'
@@ -27,77 +26,68 @@ import { CATALOG_COLUMNS } from './types'
 
 const OUTLINE_MODEL = 'claude-sonnet-4-6' // small output, accuracy matters
 const EXPAND_MODEL = 'claude-haiku-4-5'   // bigger volume, cheap+fast
-const EXPAND_CONCURRENCY = 4
-const EXPAND_MAX_TOKENS = 4096
-const OUTLINE_MAX_TOKENS = 4096
+const EXPAND_CONCURRENCY = 3              // 3 sections in parallel; safe for 8K OPM tier
+const EXPAND_MAX_TOKENS = 8000
+const OUTLINE_MAX_TOKENS = 2048
 
-interface ServiceStub {
-  service_name: string
-  page_number: number       // 1-indexed
-  section_index: number     // points into outline.sections[]
-  preview: string | null
-  expected_row_count: number
+interface DocSection {
+  header: string
+  page_start: number  // 1-indexed inclusive
+  page_end: number    // 1-indexed inclusive
 }
 
 interface DocOutline {
-  sections: string[]        // ordered, verbatim, distinct section headers from the PDF
-  stubs: ServiceStub[]
+  sections: DocSection[]
 }
 
-const OUTLINE_SYSTEM = `אתה סורק מסמך ספק של Vilo Marketplace ומפיק שני פלטים:
+const OUTLINE_SYSTEM = `אתה סורק מסמך ספק של Vilo Marketplace ומחזיר את חלוקת הסקציות בלבד.
 
-1. sections: רשימה מסודרת של כל כותרות הסקציות במסמך, כפי שהן מופיעות בדיוק.
-   - שמור על הטקסט verbatim — בלי לערוך, בלי להוסיף, בלי לקצר.
-   - כל סקציה מופיעה פעם אחת בלבד, גם אם יש בה כמה שירותים.
-   - דוגמה למסמך טיפוסי: ["מתנות לעובדים", "פעילות לזוגות", "פעילות להורים לילדים צעירים", "פעילות להורים למתבגרים (גלאי 12-18)", "פעילות לצוותים/ לעובדים"]
+לכל סקציה החזר:
+- header: כותרת הסקציה verbatim כפי שמופיעה במסמך (לדוגמה "מתנות לעובדים", "פעילות לזוגות"). אסור לסכם, לקצר או לרענן.
+- page_start: עמוד התחלה (1-indexed)
+- page_end: עמוד סיום (1-indexed, כולל)
 
-2. stubs: רשימה של השירותים במסמך. כל stub:
-   - service_name: שם השירות כפי שמופיע במסמך
-   - page_number: העמוד שבו השירות מתחיל (1-indexed)
-   - section_index: index לתוך sections[] (0-based). זו הקטגוריה של השירות הזה.
-   - preview: משפט אחד שמתאר את השירות
-   - expected_row_count: כמה שורות שלב הבא צפוי להחזיר. ספור מדרגות תמחור / וריאציות נפרדות:
-       * מחיר אחד = 1
-       * 6 רמות (3 בקליניקה + 3 במקום העבודה) = 6
-       * "בשבילנו" עם מפגש בודד וסדרה = 2
-       * אם השירות אומר "ראה תמחור X" → ספור את אותן וריאציות
+כללים:
+- אל תיצור רשימת שירותים. רק סקציות (כותרות גדולות במסמך).
+- אם סקציה מתחילה באמצע עמוד ונמשכת לעמוד הבא — כללי את כל הטווח (start = העמוד שבו הכותרת מופיעה, end = העמוד האחרון שמכיל תוכן של הסקציה).
+- מסמך טיפוסי בעל 3-7 סקציות.
+- שני סקציות יכולות לחלוק עמוד (סקציה A מסתיימת בעמוד 3, סקציה B מתחילה בעמוד 3). זה תקין.`
 
-כללים קריטיים:
-- אל תיצור שורות נפרדות פר מדרגת תמחור — זה לשלב הבא. שירות אחד = stub אחד.
-- אל תמציא כותרות סקציה. אם השם בדיוק "מתנות לעובדים" — תחזיר אותו כך, לא "פעילויות לרווחת עובדים".
-- כל stub חייב לקבל section_index. אם השירות מופיע באותה סקציה כמו שירות אחר — חייבים אותו section_index.
-- שירותים עם אותו שם בסקציות שונות (למשל "יעוץ פרטני להורים" גם בסקציית הילדים הצעירים וגם בסקציית המתבגרים) הם stubs נפרדים עם section_index שונים.`
+const EXPAND_SYSTEM = `אתה מחלץ את כל השירותים בסקציה אחת ממסמך ספק של Vilo Marketplace.
 
-const EXPAND_SYSTEM = `אתה מחלץ פרטים מלאים של שירות בודד מתוך מסמך ספק.
+המסמך שצורף מכיל את העמודים של הסקציה (יכול להכיל גם תוכן של סקציות שכנות — התעלם ממנו).
+שם הסקציה ייאמר בהודעת המשתמש — חלץ רק שירותים שייכים לסקציה הזו.
 
-המסמך שצורף מכיל עמוד אחד או שניים — מיקדנו את התשומה כדי לחסוך טוקנים.
-המשתמש כבר זיהה איזה שירות לחלץ; המידע יופיע בהודעה.
-
-הוראות:
-- צור שורה נפרדת לכל מדרגת תמחור או וריאציה (מחיר שונה / כמות אנשים שונה / מיקום שונה / חבילת שעות).
-- חובה: אם המשתמש אומר "אני מצפה ל-N שורות", מצא בדיוק N וריאציות. אל תאחד אותן לשורה אחת.
+הוראות חילוץ:
+- חלץ כל שירות שמופיע בסקציה.
+- חובה: לכל שירות עם מדרגות תמחור מרובות — צור שורה לכל מדרגה.
+  דוגמאות:
+    * "₪500 לשעה במפגש בודד / ₪4800 לבנק של 10 שעות / ₪9000 לבנק של 20 שעות" → 3 שורות.
+    * "אם במקום העבודה: ₪650 לשעה / ₪6200 ל-10 שעות / ₪12,000 ל-20 שעות" → עוד 3 שורות (סך הכל 6).
+    * "מפגש בודד ₪3000 / סדרה של 3 מפגשים ₪7000" → 2 שורות.
 - שמור טקסט בעברית verbatim. אל תתרגם.
 - price_type: 'fixed' למחיר בודד, 'range' לטווח, 'on_request' אם אין מחיר ספציפי.
 
-שדה location_mode — חובה למלא בכל שורה. אל תחזיר null אלא אם באמת אין שום רמז:
+שדה location_mode — חובה למלא בכל שורה. אל תחזיר null:
 - at_provider = במתחם של הספק (קליניקה / סטודיו / מתקן של הספק)
-- at_client = במשרד / במתחם של הלקוח (עובדי הארגון)
+- at_client = במשרד / במתחם של הלקוח / במקום העבודה
 - remote = מקוון (זום וכו')
-- hybrid = יכול להתקיים בשתיהן, לפי בחירה
+- hybrid = יכול להתקיים בשתיהן
 
-דוגמאות (חובה לעקוב!):
-- "בקליניקה שלי" / "בקליניקה בגבעת שמואל" / "בקליניקה" → at_provider
-- "במקום העבודה" / "במשרד" / "בחצרי הלקוח" / "אצל הלקוח" → at_client
-- שורה שמדברת על "מפגש בודד" בלי ציון מקום, אבל יש לה שורה אחרת מפורשת על "במקום העבודה" — אז הראשונה היא at_provider (ברירת המחדל לעובדה הזו).
-- הרצאה לעובדים שלא ציינו איפה — בדרך כלל at_client (המרצה מגיע למקום העבודה).
-- שיעור עם שני מחירים, אחד "אצל הספק" ואחד "אצל הלקוח" → שתי שורות נפרדות, אחת at_provider ואחת at_client.
-- "ניתן לקיים אצלכם או אצלנו" → hybrid
-- "בזום" / "מקוון" / "אונליין" → remote
+ברירת מחדל אם לא ברור במסמך:
+- הרצאות / סדנאות / פעילויות לעובדי הארגון → at_client (הספק מגיע למקום העבודה)
+- שירותי ייעוץ פרטני "בקליניקה" → at_provider
+- שירותי ייעוץ פרטני "במקום העבודה" → at_client
+- מוצרים פיזיים / מתנות (משחקים, ערכות) → at_client (העובדים מקבלים אותם בעבודה)
 
-חובה: 95% מהשורות חייבות location_mode לא-null. null זה רק כשבאמת אין שום מידע מהקשר.
+confidence (1-5):
+- 5 = הערך מפורש במסמך
+- 4 = ברור מהקשר
+- 3 = הסקת הגיוני
+- 2 = השערה
+- 1 = ניחוש (במיוחד אם השתמשת בברירת מחדל)
 
-- supplier_notes: כל מידע שלא נכנס לשדות אחרים — מע"מ, נסיעות, יחידת תמחור, תיאור התמחיר.
-- confidence (לכל שדה): 5 = קראתי בדיוק מהמסמך, 3 = הסקתי הגיוני, 1 = ניחוש.`
+- supplier_notes: כל מידע נוסף — מע"מ, נסיעות, יחידת תמחור, הערות תמחיר, מספר מפגשים.`
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
@@ -157,13 +147,14 @@ async function slicePdfPages(
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Pass A — outline scan
+// Pass A — section outline (just boundaries, no services)
 // ──────────────────────────────────────────────────────────────────────
 
-async function outlineScanPdf(
+async function outlineSections(
   client: Anthropic,
   pdfBuffer: Buffer,
-  label: string
+  label: string,
+  totalPages: number
 ): Promise<DocOutline> {
   const response = await withRateLimitRetry(
     () =>
@@ -174,50 +165,32 @@ async function outlineScanPdf(
         tools: [
           {
             name: 'submit_outline',
-            description:
-              'Submit the sections and stubs found in the document. Sections is the canonical list of section headers; each stub references one section by index.',
+            description: 'Submit the section boundaries found in the document.',
             input_schema: {
               type: 'object',
               properties: {
                 sections: {
                   type: 'array',
-                  description:
-                    'Ordered list of distinct section headers in the document, verbatim.',
-                  items: { type: 'string' },
-                },
-                stubs: {
-                  type: 'array',
                   items: {
                     type: 'object',
                     properties: {
-                      service_name: { type: 'string' },
-                      page_number: { type: 'integer' },
-                      section_index: {
-                        type: 'integer',
-                        description:
-                          '0-based index into sections[]. The section this service belongs to.',
-                      },
-                      preview: { type: ['string', 'null'] },
-                      expected_row_count: { type: 'integer' },
+                      header: { type: 'string' },
+                      page_start: { type: 'integer' },
+                      page_end: { type: 'integer' },
                     },
-                    required: [
-                      'service_name',
-                      'page_number',
-                      'section_index',
-                      'expected_row_count',
-                    ],
+                    required: ['header', 'page_start', 'page_end'],
                   },
                 },
               },
-              required: ['sections', 'stubs'],
+              required: ['sections'],
             },
           },
         ],
         tool_choice: { type: 'tool', name: 'submit_outline' },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: [
           {
             role: 'user',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             content: [
               {
                 type: 'document',
@@ -229,7 +202,7 @@ async function outlineScanPdf(
               },
               {
                 type: 'text',
-                text: `מקור: ${label}\n\nקרא את המסמך וצור outline — רשימת כל השירותים שמופיעים. אל תפרק עדיין למדרגות תמחור.`,
+                text: `מקור: ${label} (${totalPages} עמודים)\n\nזהה את הסקציות וטווחי העמודים שלהן.`,
               },
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ] as any,
@@ -241,57 +214,52 @@ async function outlineScanPdf(
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
-    throw new Error(`Outline scan: no tool use. stop_reason=${response.stop_reason}`)
+    throw new Error(`Outline: no tool use. stop_reason=${response.stop_reason}`)
   }
-  const input = toolUse.input as {
-    sections?: string[]
-    stubs?: ServiceStub[]
+  const input = toolUse.input as { sections?: DocSection[] }
+  if (!Array.isArray(input.sections) || input.sections.length === 0) {
+    // Fallback: treat whole doc as one section.
+    console.warn('[outline] no sections returned — falling back to whole-doc as one section')
+    return {
+      sections: [{ header: label, page_start: 1, page_end: totalPages }],
+    }
   }
-  if (!Array.isArray(input.sections) || !Array.isArray(input.stubs)) {
-    throw new Error('Outline scan returned malformed { sections, stubs }.')
-  }
+
+  // Clamp page ranges to actual doc and ensure start<=end.
   const sections = input.sections
-  // Default expected_row_count to 1 if omitted. Clamp section_index to range.
-  const stubs = input.stubs.map((s) => ({
-    ...s,
-    section_index:
-      typeof s.section_index === 'number' &&
-      s.section_index >= 0 &&
-      s.section_index < sections.length
-        ? s.section_index
-        : 0,
-    expected_row_count:
-      typeof s.expected_row_count === 'number' && s.expected_row_count > 0
-        ? s.expected_row_count
-        : 1,
-  }))
+    .map((s) => ({
+      header: String(s.header || '').trim(),
+      page_start: Math.max(1, Math.min(totalPages, s.page_start)),
+      page_end: Math.max(1, Math.min(totalPages, s.page_end)),
+    }))
+    .filter((s) => s.header.length > 0 && s.page_start <= s.page_end)
+
   console.log(
-    `[outline] ${sections.length} sections, ${stubs.length} services`
+    `[outline] ${sections.length} sections:`,
+    sections.map((s) => `"${s.header}" (p${s.page_start}-${s.page_end})`).join(', ')
   )
-  return { sections, stubs }
+  return { sections }
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Pass B — expand one service
+// Pass B — expand one section into all its rows
 // ──────────────────────────────────────────────────────────────────────
 
 interface RowWithConfidence extends CatalogRow {
   _confidence?: CatalogRow['_confidence']
 }
 
-async function expandServiceFromPdf(
+async function expandSection(
   client: Anthropic,
   pdfBuffer: Buffer,
-  stub: ServiceStub,
-  sectionHeader: string,
-  totalPages: number,
-  label: string,
-  retryReason: string | null = null
+  section: DocSection,
+  label: string
 ): Promise<RowWithConfidence[]> {
-  // Slice to ±1 page window around the stub
-  const start = Math.max(1, stub.page_number - 1)
-  const end = Math.min(totalPages, stub.page_number + 1)
-  const slicedBuffer = await slicePdfPages(pdfBuffer, start, end)
+  const slicedBuffer = await slicePdfPages(
+    pdfBuffer,
+    section.page_start,
+    section.page_end
+  )
 
   const response = await withRateLimitRetry(
     () =>
@@ -301,9 +269,9 @@ async function expandServiceFromPdf(
         system: EXPAND_SYSTEM,
         tools: [
           {
-            name: 'submit_service_rows',
+            name: 'submit_section_rows',
             description:
-              'Submit all catalog rows for the one specific service named in the user message, expanded across pricing tiers.',
+              'Submit all catalog rows for the section. Multiple pricing tiers of one service = multiple rows.',
             input_schema: {
               type: 'object',
               properties: {
@@ -328,13 +296,13 @@ async function expandServiceFromPdf(
                             }
                           : col === 'location_mode'
                           ? {
-                              type: ['string', 'null'],
+                              // No null in the enum — force the model to choose.
+                              type: 'string',
                               enum: [
                                 'at_client',
                                 'at_provider',
                                 'remote',
                                 'hybrid',
-                                null,
                               ],
                             }
                           : { type: ['string', 'null'] },
@@ -346,7 +314,7 @@ async function expandServiceFromPdf(
                 confidence: {
                   type: 'array',
                   description:
-                    'One confidence object per row in rows[]. Same indexing as rows.',
+                    'One confidence object per row, same indexing as rows.',
                   items: {
                     type: 'object',
                     properties: Object.fromEntries(
@@ -363,7 +331,7 @@ async function expandServiceFromPdf(
             },
           },
         ],
-        tool_choice: { type: 'tool', name: 'submit_service_rows' },
+        tool_choice: { type: 'tool', name: 'submit_section_rows' },
         messages: [
           {
             role: 'user',
@@ -380,28 +348,29 @@ async function expandServiceFromPdf(
               {
                 type: 'text',
                 text:
-                  `מקור: ${label} (עמודים ${start}-${end})\n\n` +
-                  `חלץ את כל המדרגות / הגרסאות של השירות הזה:\n` +
-                  `- שם: ${stub.service_name}\n` +
-                  `- קטגוריה: ${sectionHeader}\n` +
-                  (stub.preview ? `- תיאור: ${stub.preview}\n` : '') +
-                  `\nאני מצפה לקבל בדיוק ${stub.expected_row_count} שורה(ות). ` +
-                  `כל מדרגת תמחור / וריאציה = שורה נפרדת.` +
-                  `\nחובה למלא location_mode בכל שורה.` +
-                  (retryReason ? `\n\nהערה: ${retryReason}` : ''),
+                  `מקור: ${label} (סקציה "${section.header}", עמודים ${section.page_start}-${section.page_end})\n\n` +
+                  `חלץ את כל השירותים בסקציה "${section.header}".\n` +
+                  `כל מדרגת תמחור / וריאציה = שורה נפרדת.\n` +
+                  `חובה למלא location_mode בכל שורה (בחר אחד מ-at_client / at_provider / remote / hybrid — אסור null).`,
               },
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ] as any,
           },
         ],
       }),
-    `expand:${stub.service_name.slice(0, 30)}`
+    `section:${section.header.slice(0, 30)}`
   )
+
+  if (response.stop_reason === 'max_tokens') {
+    console.warn(
+      `[section:${section.header.slice(0, 30)}] hit max_tokens — output may be partial`
+    )
+  }
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
     console.warn(
-      `Expand: no tool use for "${stub.service_name}". stop_reason=${response.stop_reason}`
+      `[section:${section.header.slice(0, 30)}] no tool use. stop_reason=${response.stop_reason}`
     )
     return []
   }
@@ -409,61 +378,16 @@ async function expandServiceFromPdf(
     rows?: CatalogRow[]
     confidence?: Partial<Record<keyof CatalogRow, ConfidenceScore>>[]
   }
-  if (!Array.isArray(input.rows)) {
-    console.warn(`Expand: no rows for "${stub.service_name}"`)
-    return []
-  }
+  if (!Array.isArray(input.rows)) return []
 
-  // Pair rows with confidence
+  console.log(
+    `[section:${section.header.slice(0, 30)}] ${input.rows.length} rows`
+  )
+
   return input.rows.map((row, i) => ({
     ...row,
     _confidence: input.confidence?.[i],
   }))
-}
-
-/**
- * Run Pass B and, if the model returned far fewer rows than the stub
- * promised, retry once with explicit feedback about the shortfall.
- * Caps at one retry to keep the call budget bounded.
- */
-async function expandWithRetry(
-  client: Anthropic,
-  pdfBuffer: Buffer,
-  stub: ServiceStub,
-  sectionHeader: string,
-  totalPages: number,
-  label: string
-): Promise<RowWithConfidence[]> {
-  const first = await expandServiceFromPdf(
-    client,
-    pdfBuffer,
-    stub,
-    sectionHeader,
-    totalPages,
-    label
-  )
-  const expected = Math.max(1, stub.expected_row_count)
-
-  if (first.length >= expected || expected <= 1) {
-    return first
-  }
-
-  const reason =
-    `החזרת ${first.length} שורות אבל המסמך מתאר ${expected} ` +
-    `וריאציות שונות (מדרגות תמחור / מיקומים / חבילות). מצא את כולן.`
-  console.warn(
-    `[expand:${stub.service_name.slice(0, 30)}] short by ${expected - first.length} rows, retrying`
-  )
-  const second = await expandServiceFromPdf(
-    client,
-    pdfBuffer,
-    stub,
-    sectionHeader,
-    totalPages,
-    label,
-    reason
-  )
-  return second.length > first.length ? second : first
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -483,10 +407,9 @@ function computeConfidenceAvg(
 }
 
 function rowKey(r: CatalogRow): string {
-  // supplier_category included so that same-named services in different
-  // PDF sections (e.g. "יעוץ פרטני להורים" appears in both the young-kids
-  // section and the teens section with identical prices) are NOT collapsed
-  // by dedup.
+  // Category included so same-named services from different PDF sections
+  // don't collapse. location_mode included so the same service at different
+  // venues stays as separate rows.
   return [
     r.supplier_name,
     r.supplier_category,
@@ -516,16 +439,7 @@ export function mergeAndValidate(rows: RowWithConfidence[]): CatalogRow[] {
   return Array.from(seen.values())
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Public entry
-// ──────────────────────────────────────────────────────────────────────
-
-/**
- * Force every row's supplier_category to be exactly the doc-level
- * section header (canonical, verbatim from Pass A's sections[]). The
- * model can no longer invent per-stub phrasings since it never sees
- * the header as a string — only as an index into the doc-level list.
- */
+/** Force every row's supplier_category to the canonical section header. */
 function pinCategory(
   rows: RowWithConfidence[],
   sectionHeader: string
@@ -533,28 +447,33 @@ function pinCategory(
   return rows.map((r) => ({ ...r, supplier_category: sectionHeader }))
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Public entry
+// ──────────────────────────────────────────────────────────────────────
+
 export async function multipassPdf(
   client: Anthropic,
   pdfBuffer: Buffer,
   label: string
 ): Promise<CatalogRow[]> {
-  const outline = await outlineScanPdf(client, pdfBuffer, label)
-  if (outline.stubs.length === 0) return []
-
   const totalPages = (await PDFDocument.load(pdfBuffer)).getPageCount()
+  console.log(`[multipass] "${label}" (${totalPages} pages)`)
 
-  const expanded = await pMap(outline.stubs, EXPAND_CONCURRENCY, async (stub) => {
-    const sectionHeader = outline.sections[stub.section_index] ?? 'אחר'
-    const rows = await expandWithRetry(
-      client,
-      pdfBuffer,
-      stub,
-      sectionHeader,
-      totalPages,
-      label
-    )
-    return pinCategory(rows, sectionHeader)
-  })
+  const outline = await outlineSections(client, pdfBuffer, label, totalPages)
+  if (outline.sections.length === 0) return []
 
-  return mergeAndValidate(expanded.flat())
+  const expanded = await pMap(
+    outline.sections,
+    EXPAND_CONCURRENCY,
+    async (section) => {
+      const rows = await expandSection(client, pdfBuffer, section, label)
+      return pinCategory(rows, section.header)
+    }
+  )
+
+  const merged = mergeAndValidate(expanded.flat())
+  console.log(
+    `[multipass] "${label}" -> ${merged.length} unique rows across ${outline.sections.length} sections`
+  )
+  return merged
 }
