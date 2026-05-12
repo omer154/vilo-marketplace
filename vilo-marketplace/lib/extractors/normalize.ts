@@ -34,6 +34,31 @@ const SYSTEM_PROMPT = `אתה עוזר חילוץ נתונים של פלטפור
 // max_tokens. 25 has been a good sweet spot for the master catalog.
 const CHUNK_SIZE = 25
 
+// Cap on concurrent Claude calls. 688-row catalog = 28 chunks; running all
+// 28 in parallel risks 429s from Anthropic's per-minute rate limits.
+// 5 concurrent ≈ ~6 sequential batches, ~60s total walltime — well under
+// the route's maxDuration.
+const MAX_CONCURRENCY = 5
+
+/** Run `fn` over `items` with bounded concurrency. Preserves index order. */
+async function pMap<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = nextIndex++
+      if (i >= items.length) break
+      results[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
 const TOOL_INPUT_SCHEMA = {
   type: 'object' as const,
   properties: {
@@ -148,10 +173,8 @@ export async function normalizeWithClaude(
     for (let i = 0; i < source.rows.length; i += CHUNK_SIZE) {
       chunks.push(source.rows.slice(i, i + CHUNK_SIZE))
     }
-    // Parallel. Anthropic handles concurrent requests fine; if rate-limit
-    // hits become a problem we can serialize with p-limit later.
-    const results = await Promise.all(
-      chunks.map((chunk) => normalizeOne(client, source, chunk))
+    const results = await pMap(chunks, MAX_CONCURRENCY, (chunk) =>
+      normalizeOne(client, source, chunk)
     )
     return results.flat()
   }
