@@ -29,22 +29,64 @@ const SYSTEM_PROMPT = `אתה עוזר חילוץ נתונים של פלטפור
 - tags: רשימת תגיות מופרדות בפסיק (לדוגמה: "גיבוש, חוף, גלישה").
 - שמור על שמות בעברית כפי שהם, אל תתרגם.`
 
-export async function normalizeWithClaude(
-  source: ExtractedSource
+// How many input rows to send Claude per request. Larger means fewer round
+// trips; smaller means each call is faster and less likely to hit
+// max_tokens. 25 has been a good sweet spot for the master catalog.
+const CHUNK_SIZE = 25
+
+const TOOL_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    rows: {
+      type: 'array' as const,
+      items: {
+        type: 'object' as const,
+        properties: {
+          supplier_id: { type: ['string', 'null'] },
+          supplier_name: { type: ['string', 'null'] },
+          supplier_name_en: { type: ['string', 'null'] },
+          supplier_category: {
+            type: ['string', 'null'],
+            enum: [...CATEGORY_VALUES, null],
+          },
+          supplier_website: { type: ['string', 'null'] },
+          service_id: { type: ['string', 'null'] },
+          service_name: { type: ['string', 'null'] },
+          service_description: { type: ['string', 'null'] },
+          price_ils: { type: ['number', 'null'] },
+          price_type: {
+            type: ['string', 'null'],
+            enum: ['fixed', 'on_request', 'range', null],
+          },
+          price_min: { type: ['number', 'null'] },
+          price_max: { type: ['number', 'null'] },
+          capacity_min: { type: ['integer', 'null'] },
+          capacity_max: { type: ['integer', 'null'] },
+          duration_hours: { type: ['number', 'null'] },
+          location: {
+            type: ['string', 'null'],
+            enum: ['offsite', 'onsite', 'flexible', 'remote', null],
+          },
+          tags: { type: ['string', 'null'] },
+          supplier_notes: { type: ['string', 'null'] },
+        },
+        required: CATALOG_COLUMNS,
+      },
+    },
+  },
+  required: ['rows'],
+}
+
+async function normalizeOne(
+  client: Anthropic,
+  source: ExtractedSource,
+  rowsChunk?: Record<string, unknown>[]
 ): Promise<CatalogRow[]> {
-  const apiKey = process.env.VILO_ANTHROPIC_KEY
-  if (!apiKey) throw new Error('Missing VILO_ANTHROPIC_KEY')
-
-  const client = new Anthropic({ apiKey })
-
-  // Build a single user message from whatever the extractor handed us.
   let userContent = `מקור: ${source.source_label} (סוג: ${source.source_type})\n\n`
-  if (source.rows && source.rows.length) {
-    userContent += `שורות מובנות מהמקור (${source.rows.length} שורות):\n`
-    // Cap at 200 rows per request to keep tokens reasonable. The /api route
-    // can chunk if needed.
-    const sample = source.rows.slice(0, 200)
-    userContent += JSON.stringify(sample, null, 2)
+
+  if (rowsChunk && rowsChunk.length) {
+    userContent += `שורות מובנות מהמקור (${rowsChunk.length} שורות):\n`
+    userContent += JSON.stringify(rowsChunk, null, 2)
   } else if (source.raw_text) {
     userContent += `טקסט גולמי:\n${source.raw_text.slice(0, 80_000)}`
   } else {
@@ -53,65 +95,66 @@ export async function normalizeWithClaude(
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 8192,
+    max_tokens: 16_384,
     system: SYSTEM_PROMPT,
     tools: [
       {
         name: 'submit_catalog_rows',
         description:
           'Submit the extracted catalog rows. One row per service, per pricing tier.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            rows: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  supplier_id: { type: ['string', 'null'] },
-                  supplier_name: { type: ['string', 'null'] },
-                  supplier_name_en: { type: ['string', 'null'] },
-                  supplier_category: {
-                    type: ['string', 'null'],
-                    enum: [...CATEGORY_VALUES, null],
-                  },
-                  supplier_website: { type: ['string', 'null'] },
-                  service_id: { type: ['string', 'null'] },
-                  service_name: { type: ['string', 'null'] },
-                  service_description: { type: ['string', 'null'] },
-                  price_ils: { type: ['number', 'null'] },
-                  price_type: {
-                    type: ['string', 'null'],
-                    enum: ['fixed', 'on_request', 'range', null],
-                  },
-                  price_min: { type: ['number', 'null'] },
-                  price_max: { type: ['number', 'null'] },
-                  capacity_min: { type: ['integer', 'null'] },
-                  capacity_max: { type: ['integer', 'null'] },
-                  duration_hours: { type: ['number', 'null'] },
-                  location: {
-                    type: ['string', 'null'],
-                    enum: ['offsite', 'onsite', 'flexible', 'remote', null],
-                  },
-                  tags: { type: ['string', 'null'] },
-                  supplier_notes: { type: ['string', 'null'] },
-                },
-                required: CATALOG_COLUMNS,
-              },
-            },
-          },
-          required: ['rows'],
-        },
+        input_schema: TOOL_INPUT_SCHEMA,
       },
     ],
     tool_choice: { type: 'tool', name: 'submit_catalog_rows' },
     messages: [{ role: 'user', content: userContent }],
   })
 
+  if (response.stop_reason === 'max_tokens') {
+    console.warn(
+      `Claude hit max_tokens on chunk (${rowsChunk?.length ?? '?'} input rows). Output likely truncated.`
+    )
+  }
+
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
-    throw new Error('Claude did not return tool use')
+    throw new Error(
+      `Claude did not return tool use. stop_reason=${response.stop_reason}`
+    )
   }
-  const input = toolUse.input as { rows: CatalogRow[] }
+  const input = toolUse.input as { rows?: CatalogRow[] }
+  if (!Array.isArray(input.rows)) {
+    throw new Error(
+      `Claude tool input has no rows array. stop_reason=${response.stop_reason}. Likely max_tokens — increase CHUNK_SIZE smaller or max_tokens larger.`
+    )
+  }
   return input.rows
+}
+
+/**
+ * Public entry point. If the source has structured rows, chunk into
+ * CHUNK_SIZE-row batches and process in parallel. Otherwise (PDF/Word/URL
+ * raw text), one call.
+ */
+export async function normalizeWithClaude(
+  source: ExtractedSource
+): Promise<CatalogRow[]> {
+  const apiKey = process.env.VILO_ANTHROPIC_KEY
+  if (!apiKey) throw new Error('Missing VILO_ANTHROPIC_KEY')
+
+  const client = new Anthropic({ apiKey })
+
+  if (source.rows && source.rows.length > CHUNK_SIZE) {
+    const chunks: Record<string, unknown>[][] = []
+    for (let i = 0; i < source.rows.length; i += CHUNK_SIZE) {
+      chunks.push(source.rows.slice(i, i + CHUNK_SIZE))
+    }
+    // Parallel. Anthropic handles concurrent requests fine; if rate-limit
+    // hits become a problem we can serialize with p-limit later.
+    const results = await Promise.all(
+      chunks.map((chunk) => normalizeOne(client, source, chunk))
+    )
+    return results.flat()
+  }
+
+  return normalizeOne(client, source, source.rows)
 }

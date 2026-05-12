@@ -44,6 +44,28 @@ export default function ExtractPage() {
   const [url, setUrl] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  const handleResponse = async (
+    res: Response,
+    label: string
+  ): Promise<ResultState> => {
+    let json: { rows?: CatalogRow[]; error?: string } = {}
+    try {
+      json = await res.json()
+    } catch {
+      return { kind: 'error', message: `שגיאת רשת (סטטוס ${res.status})` }
+    }
+    if (!res.ok) {
+      return { kind: 'error', message: json.error || `extraction failed (${res.status})` }
+    }
+    if (!Array.isArray(json.rows)) {
+      return {
+        kind: 'error',
+        message: 'התשובה מהשרת לא הכילה שורות. נסה שוב או בדוק את הקובץ.',
+      }
+    }
+    return { kind: 'success', rows: json.rows, source_label: label }
+  }
+
   const submitFile = async (file: File) => {
     setState({ kind: 'extracting', label: file.name })
     const form = new FormData()
@@ -53,9 +75,7 @@ export default function ExtractPage() {
         method: 'POST',
         body: form,
       })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'extraction failed')
-      setState({ kind: 'success', rows: json.rows, source_label: file.name })
+      setState(await handleResponse(res, file.name))
     } catch (err) {
       setState({
         kind: 'error',
@@ -74,9 +94,7 @@ export default function ExtractPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: url.trim() }),
       })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'extraction failed')
-      setState({ kind: 'success', rows: json.rows, source_label: url })
+      setState(await handleResponse(res, url))
     } catch (err) {
       setState({
         kind: 'error',
@@ -179,7 +197,7 @@ export default function ExtractPage() {
         </div>
       )}
 
-      {state.kind === 'success' && (
+      {state.kind === 'success' && Array.isArray(state.rows) && (
         <div className="space-y-3">
           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-start gap-3">
             <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />

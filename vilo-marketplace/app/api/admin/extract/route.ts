@@ -9,7 +9,7 @@ import { normalizeWithClaude } from '@/lib/extractors/normalize'
 import type { ExtractedSource } from '@/lib/extractors/types'
 
 export const runtime = 'nodejs'
-export const maxDuration = 120
+export const maxDuration = 180
 
 export async function POST(request: NextRequest) {
   if (!(await isCurrentUserAdmin())) {
@@ -58,6 +58,9 @@ export async function POST(request: NextRequest) {
     }
 
     const rows = await normalizeWithClaude(source)
+    if (!Array.isArray(rows)) {
+      throw new Error('Normalizer returned a non-array result')
+    }
     return NextResponse.json({
       source: {
         source_type: source.source_type,
