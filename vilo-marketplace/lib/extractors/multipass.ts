@@ -1,22 +1,27 @@
 /**
- * Multi-pass extractor for messy unstructured docs (PDFs primarily).
+ * Window-based PDF extractor.
  *
- * Section-as-unit, not service-as-unit. Three rounds of service-stub
- * extraction kept losing entire services (Pass A's outline missed them,
- * so Pass B never saw them). The new flow asks Pass A only for SECTION
- * BOUNDARIES — header + page range — which are coarse and hard to miss.
- * Then ONE Pass B call per section extracts every service + every
- * pricing tier in that page range.
+ * Five rounds of section-based extraction (Pass A → Pass B per section)
+ * regressed from 34 → 28 → 26 → 15 → ... rows. Three independent
+ * audit agents concluded the architecture was wrong, not the patches:
+ * Pass A is a probabilistic step used as a deterministic index, so any
+ * mistake in its page-range output produces silent zero-row sections.
  *
- *   Pass A — outlineSections(): tiny call, ~500 tokens out. Just sections.
- *   Pass B — expandSection(): one call per section. Sliced PDF, "extract
- *            every service and every pricing tier in this section."
- *            Category for all rows is pinned in JS from the canonical
- *            section header.
- *   Pass C — mergeAndValidate(): pure JS, dedupe, average confidence.
+ * New flow:
+ *   1. Mechanical 3-page windows with 1-page overlap. No model in
+ *      the segmenter — pure JS, deterministic.
+ *   2. extractWindow() — one Haiku call per window. Returns rows with
+ *      a `section_header_seen` field per row (the model just reports
+ *      what it sees; no global commitment).
+ *   3. reconcileSections() — one tiny Sonnet call mapping the set of
+ *      observed header strings onto a canonical taxonomy (variations,
+ *      typos, or partial captures collapse to the canonical form).
+ *   4. Merge in JS with a dedup key that includes supplier_name +
+ *      canonical category + duration so legitimately distinct rows
+ *      never collide. Overlap-induced duplicates collapse cleanly.
  *
- * Confidence: every Pass B row carries a per-field 1-5 score so the
- * Sheet shows red/yellow/green.
+ * Why this wins: missing rows are invisible; duplicates are cheap to
+ * fix in JS. Overlap optimizes for the right side of that asymmetry.
  */
 
 import Anthropic from '@anthropic-ai/sdk'
@@ -24,76 +29,77 @@ import { PDFDocument } from 'pdf-lib'
 import type { CatalogRow, ConfidenceScore } from './types'
 import { CATALOG_COLUMNS } from './types'
 
-const OUTLINE_MODEL = 'claude-sonnet-4-6' // small output, accuracy matters
-const EXPAND_MODEL = 'claude-haiku-4-5'   // bigger volume, cheap+fast
-const EXPAND_CONCURRENCY = 3              // 3 sections in parallel; safe for 8K OPM tier
-const EXPAND_MAX_TOKENS = 8000
-const OUTLINE_MAX_TOKENS = 2048
+const EXTRACT_MODEL = 'claude-haiku-4-5'
+const RECONCILE_MODEL = 'claude-sonnet-4-6'
+const WINDOW_SIZE = 3
+const WINDOW_OVERLAP = 1
+const WINDOW_CONCURRENCY = 3
+const WINDOW_MAX_TOKENS = 8_000
+const RECONCILE_MAX_TOKENS = 1_500
 
-interface DocSection {
-  header: string
-  page_start: number  // 1-indexed inclusive
-  page_end: number    // 1-indexed inclusive
-}
+const EXTRACT_SYSTEM = `אתה מחלץ שירותים מתוך חלון של מספר עמודים ממסמך ספק של Vilo Marketplace.
 
-interface DocOutline {
-  sections: DocSection[]
-}
+חלץ את כל השירותים שנראים בעמודים שצורפו.
 
-const OUTLINE_SYSTEM = `אתה סורק מסמך ספק של Vilo Marketplace ומחזיר את חלוקת הסקציות בלבד.
-
-לכל סקציה החזר:
-- header: כותרת הסקציה verbatim כפי שמופיעה במסמך (לדוגמה "מתנות לעובדים", "פעילות לזוגות"). אסור לסכם, לקצר או לרענן.
-- page_start: העמוד שבו הכותרת מופיעה במסמך. חובה — חייב להיות העמוד עם הכותרת עצמה. אם הכותרת באמצע עמוד 3, page_start = 3.
-- page_end: העמוד האחרון שמכיל תוכן השייך לסקציה (1-indexed, כולל)
-
-כללים קריטיים:
-- page_start חייב להיות העמוד עם הכותרת — לא העמוד הראשון של הטבלה. אם בעמוד 1 יש את הכותרת וטבלת המחירים ממשיכה לעמוד 3, page_start = 1, page_end = 3.
-- אל תיצור רשימת שירותים. רק סקציות (כותרות גדולות במסמך).
-- מסמך טיפוסי בעל 3-7 סקציות.
-- שני סקציות יכולות לחלוק עמוד (סקציה A מסתיימת בעמוד 3, סקציה B מתחילה בעמוד 3 → page_start=3 לסקציה B). זה תקין.`
-
-const EXPAND_SYSTEM = `אתה מחלץ את כל השירותים בסקציה אחת ממסמך ספק של Vilo Marketplace.
-
-המסמך שצורף מכיל את העמודים של הסקציה (יכול להכיל גם תוכן של סקציות שכנות — התעלם ממנו).
-שם הסקציה ייאמר בהודעת המשתמש — חלץ רק שירותים שייכים לסקציה הזו.
-
-הוראות חילוץ:
-- חלץ כל שירות שמופיע בסקציה.
-- חובה: לכל שירות עם מדרגות תמחור מרובות — צור שורה לכל מדרגה.
+הוראות:
+- כל מדרגת תמחור / וריאציה = שורה נפרדת.
   דוגמאות:
-    * "₪500 לשעה במפגש בודד / ₪4800 לבנק של 10 שעות / ₪9000 לבנק של 20 שעות" → 3 שורות.
-    * "אם במקום העבודה: ₪650 לשעה / ₪6200 ל-10 שעות / ₪12,000 ל-20 שעות" → עוד 3 שורות (סך הכל 6).
+    * "₪500 מפגש בודד בקליניקה / ₪4800 בנק 10 שעות / ₪9000 בנק 20 שעות" → 3 שורות (כולן at_provider).
+    * "במקום העבודה: ₪650 לשעה / ₪6200 ל-10 שעות / ₪12,000 ל-20 שעות" → 3 שורות נוספות (כולן at_client). סך הכל 6 שורות לאותו שירות.
     * "מפגש בודד ₪3000 / סדרה של 3 מפגשים ₪7000" → 2 שורות.
 - שמור טקסט בעברית verbatim. אל תתרגם.
-- price_type: 'fixed' למחיר בודד, 'range' לטווח, 'on_request' אם אין מחיר ספציפי.
+- אם שירות מפנה לתמחור של שירות אחר ("ראה תמחור יעוץ זוגי") ושירות זה מופיע באותו חלון — חלץ את אותן וריאציות עם שם השירות הנוכחי. אם השירות המוזכר לא נראה בחלון, החזר שורה אחת עם price_type='on_request' וציין בהערות.
 
-שדה location_mode — חובה למלא בכל שורה. אל תחזיר null:
+שדה section_header_seen — חובה למלא:
+- רשום את כותרת הסקציה הגדולה שנראית במסמך מעל השירות הזה (לדוגמה "מתנות לעובדים", "פעילות לזוגות", "פעילות לצוותים/ לעובדים").
+- אם הכותרת לא נראית בעמודים אבל ברור מההקשר באיזו סקציה השירות נמצא — הסק בזהירות.
+- אם אין שום דרך לדעת, החזר null.
+
+שדה location_mode — חובה למלא בכל שורה. אסור null:
 - at_provider = במתחם של הספק (קליניקה / סטודיו / מתקן של הספק)
 - at_client = במשרד / במתחם של הלקוח / במקום העבודה
 - remote = מקוון (זום וכו')
 - hybrid = יכול להתקיים בשתיהן
 
-ברירת מחדל אם לא ברור במסמך:
+ברירות מחדל אם לא ברור במסמך:
 - הרצאות / סדנאות / פעילויות לעובדי הארגון → at_client (הספק מגיע למקום העבודה)
 - שירותי ייעוץ פרטני "בקליניקה" → at_provider
 - שירותי ייעוץ פרטני "במקום העבודה" → at_client
-- מוצרים פיזיים / מתנות (משחקים, ערכות) → at_client (העובדים מקבלים אותם בעבודה)
+- מוצרים פיזיים / מתנות (משחקים, ערכות) → at_client
 
-confidence (1-5):
+price_type: 'fixed' למחיר בודד, 'range' לטווח, 'on_request' אם אין מחיר ספציפי.
+
+confidence (1-5 לכל שדה):
 - 5 = הערך מפורש במסמך
 - 4 = ברור מהקשר
-- 3 = הסקת הגיוני
+- 3 = הסקה הגיונית
 - 2 = השערה
 - 1 = ניחוש (במיוחד אם השתמשת בברירת מחדל)
 
-- supplier_notes: כל מידע נוסף — מע"מ, נסיעות, יחידת תמחור, הערות תמחיר, מספר מפגשים.`
+supplier_notes: כל מידע נוסף — מע"מ, נסיעות, יחידת תמחור, מספר מפגשים, אילוצים.`
+
+const RECONCILE_SYSTEM = `אתה מנקה רשימה של כותרות סקציה שזוהו במסמך ספק.
+
+קלט: רשימה של מחרוזות שנצפו (אותה סקציה עשויה להופיע פעמים רבות עם הבדלי כתיב או ניסוח).
+
+פלט: מפה observed_to_canonical — לכל מחרוזת שנצפתה, מה הצורה הקנונית שלה.
+
+כללים:
+- canonical חייב להיות verbatim מאחת מהמחרוזות בקלט (לא להמציא חדשות).
+- אם שתי מחרוזות הן באמת סקציות שונות — נשארות שונות.
+- בחר את הצורה הארוכה/המלאה ביותר בתור canonical כשיש ספק.
+- מסמך טיפוסי יש 3-7 סקציות קנוניות.`
+
+// ── Utilities ────────────────────────────────────────────────────────
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+async function withRateLimitRetry<T>(
+  fn: () => Promise<T>,
+  label: string
+): Promise<T> {
   try {
     return await fn()
   } catch (err) {
@@ -101,18 +107,22 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promi
     if (e?.status !== 429) throw err
     const retryAfter = Number(e.headers?.['retry-after']) || 60
     const waitMs = Math.min(retryAfter * 1000 + 1000, 65_000)
-    console.warn(`[${label}] Anthropic 429 — sleeping ${waitMs}ms then retrying once.`)
+    console.warn(`[${label}] 429 — sleeping ${waitMs}ms then retrying once.`)
     await sleep(waitMs)
     return await fn()
   }
 }
 
+/** Bounded-concurrency parallel map. Errors are logged + skipped per-item;
+ *  surviving items still produce results. */
 async function pMap<T, R>(
   items: T[],
   concurrency: number,
-  fn: (item: T, index: number) => Promise<R>
+  fn: (item: T, index: number) => Promise<R>,
+  label: string
 ): Promise<R[]> {
-  const results: R[] = new Array(items.length)
+  const results: (R | undefined)[] = new Array(items.length)
+  const errors: Array<{ i: number; err: Error }> = []
   let next = 0
   const workers = Array.from(
     { length: Math.min(concurrency, items.length) },
@@ -120,15 +130,25 @@ async function pMap<T, R>(
       while (true) {
         const i = next++
         if (i >= items.length) break
-        results[i] = await fn(items[i], i)
+        try {
+          results[i] = await fn(items[i], i)
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err))
+          errors.push({ i, err: e })
+          console.error(`[${label}] item ${i} threw: ${e.message}`)
+        }
       }
     }
   )
   await Promise.all(workers)
-  return results
+  if (errors.length) {
+    console.warn(
+      `[${label}] ${errors.length}/${items.length} items failed; continuing with the rest`
+    )
+  }
+  return results.filter((r): r is R => r !== undefined)
 }
 
-/** Slice a PDF buffer to a page range (inclusive, 1-indexed). */
 async function slicePdfPages(
   buffer: Buffer,
   startPage: number,
@@ -146,139 +166,54 @@ async function slicePdfPages(
   return Buffer.from(bytes)
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Pass A — section outline (just boundaries, no services)
-// ──────────────────────────────────────────────────────────────────────
-
-async function outlineSections(
-  client: Anthropic,
-  pdfBuffer: Buffer,
-  label: string,
-  totalPages: number
-): Promise<DocOutline> {
-  const response = await withRateLimitRetry(
-    () =>
-      client.messages.create({
-        model: OUTLINE_MODEL,
-        max_tokens: OUTLINE_MAX_TOKENS,
-        system: OUTLINE_SYSTEM,
-        tools: [
-          {
-            name: 'submit_outline',
-            description: 'Submit the section boundaries found in the document.',
-            input_schema: {
-              type: 'object',
-              properties: {
-                sections: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      header: { type: 'string' },
-                      page_start: { type: 'integer' },
-                      page_end: { type: 'integer' },
-                    },
-                    required: ['header', 'page_start', 'page_end'],
-                  },
-                },
-              },
-              required: ['sections'],
-            },
-          },
-        ],
-        tool_choice: { type: 'tool', name: 'submit_outline' },
-        messages: [
-          {
-            role: 'user',
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            content: [
-              {
-                type: 'document',
-                source: {
-                  type: 'base64',
-                  media_type: 'application/pdf',
-                  data: pdfBuffer.toString('base64'),
-                },
-              },
-              {
-                type: 'text',
-                text: `מקור: ${label} (${totalPages} עמודים)\n\nזהה את הסקציות וטווחי העמודים שלהן.`,
-              },
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ] as any,
-          },
-        ],
-      }),
-    'outline'
-  )
-
-  const toolUse = response.content.find((c) => c.type === 'tool_use')
-  if (!toolUse || toolUse.type !== 'tool_use') {
-    throw new Error(`Outline: no tool use. stop_reason=${response.stop_reason}`)
-  }
-  const input = toolUse.input as { sections?: DocSection[] }
-  if (!Array.isArray(input.sections) || input.sections.length === 0) {
-    // Fallback: treat whole doc as one section.
-    console.warn('[outline] no sections returned — falling back to whole-doc as one section')
-    return {
-      sections: [{ header: label, page_start: 1, page_end: totalPages }],
-    }
-  }
-
-  // Clamp page ranges to actual doc and ensure start<=end.
-  const sections = input.sections
-    .map((s) => ({
-      header: String(s.header || '').trim(),
-      page_start: Math.max(1, Math.min(totalPages, s.page_start)),
-      page_end: Math.max(1, Math.min(totalPages, s.page_end)),
-    }))
-    .filter((s) => s.header.length > 0 && s.page_start <= s.page_end)
-
-  console.log(
-    `[outline] ${sections.length} sections:`,
-    sections.map((s) => `"${s.header}" (p${s.page_start}-${s.page_end})`).join(', ')
-  )
-  return { sections }
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Pass B — expand one section into all its rows
-// ──────────────────────────────────────────────────────────────────────
-
-interface RowWithConfidence extends CatalogRow {
-  _confidence?: CatalogRow['_confidence']
-}
-
-async function expandSection(
-  client: Anthropic,
-  pdfBuffer: Buffer,
-  section: DocSection,
-  label: string,
+/** Generate overlapping 3-page windows. */
+function makeWindows(
   totalPages: number,
-  padding = 1
-): Promise<RowWithConfidence[]> {
-  // ±padding pages of context. Pass A often reports the page range where
-  // the content sits but misses the page where the section TITLE appears,
-  // and without the title Haiku can't anchor what it's reading.
-  const start = Math.max(1, section.page_start - padding)
-  const end = Math.min(totalPages, section.page_end + padding)
-  const slicedBuffer = await slicePdfPages(pdfBuffer, start, end)
-  const tag = `section:${section.header.slice(0, 30)}`
-  console.log(
-    `[${tag}] attempt with pages ${start}-${end} (Pass A said ${section.page_start}-${section.page_end}, +${padding} padding) — ${slicedBuffer.length} bytes`
-  )
+  size: number,
+  overlap: number
+): Array<[number, number]> {
+  if (totalPages <= size) return [[1, totalPages]]
+  const step = Math.max(1, size - overlap)
+  const windows: Array<[number, number]> = []
+  let start = 1
+  while (start <= totalPages) {
+    const end = Math.min(totalPages, start + size - 1)
+    windows.push([start, end])
+    if (end >= totalPages) break
+    start += step
+  }
+  return windows
+}
+
+// ── Window extraction (Pass 1) ───────────────────────────────────────
+
+interface WindowRow extends CatalogRow {
+  /** Set during window extraction; remapped to supplier_category after reconcile. */
+  _section_header_seen?: string | null
+}
+
+async function extractWindow(
+  client: Anthropic,
+  pdfBuffer: Buffer,
+  windowStart: number,
+  windowEnd: number,
+  label: string
+): Promise<WindowRow[]> {
+  const sliced = await slicePdfPages(pdfBuffer, windowStart, windowEnd)
+  const tag = `window:${windowStart}-${windowEnd}`
+  console.log(`[${tag}] sliced ${sliced.length} bytes`)
 
   const response = await withRateLimitRetry(
     () =>
       client.messages.create({
-        model: EXPAND_MODEL,
-        max_tokens: EXPAND_MAX_TOKENS,
-        system: EXPAND_SYSTEM,
+        model: EXTRACT_MODEL,
+        max_tokens: WINDOW_MAX_TOKENS,
+        system: EXTRACT_SYSTEM,
         tools: [
           {
-            name: 'submit_section_rows',
+            name: 'submit_window_rows',
             description:
-              'Submit all catalog rows for the section. Multiple pricing tiers of one service = multiple rows.',
+              'Submit all catalog rows visible in the page window. One row per service+pricing-tier+location variant.',
             input_schema: {
               type: 'object',
               properties: {
@@ -286,42 +221,44 @@ async function expandSection(
                   type: 'array',
                   items: {
                     type: 'object',
-                    properties: Object.fromEntries(
-                      CATALOG_COLUMNS.map((col) => [
-                        col,
-                        col === 'price_ils' ||
-                        col === 'price_min' ||
-                        col === 'price_max' ||
-                        col === 'capacity_min' ||
-                        col === 'capacity_max' ||
-                        col === 'duration_hours'
-                          ? { type: ['number', 'integer', 'null'] }
-                          : col === 'price_type'
-                          ? {
-                              type: ['string', 'null'],
-                              enum: ['fixed', 'on_request', 'range', null],
-                            }
-                          : col === 'location_mode'
-                          ? {
-                              // No null in the enum — force the model to choose.
-                              type: 'string',
-                              enum: [
-                                'at_client',
-                                'at_provider',
-                                'remote',
-                                'hybrid',
-                              ],
-                            }
-                          : { type: ['string', 'null'] },
-                      ])
-                    ),
+                    properties: {
+                      ...Object.fromEntries(
+                        CATALOG_COLUMNS.map((col) => [
+                          col,
+                          col === 'price_ils' ||
+                          col === 'price_min' ||
+                          col === 'price_max' ||
+                          col === 'capacity_min' ||
+                          col === 'capacity_max' ||
+                          col === 'duration_hours'
+                            ? { type: ['number', 'integer', 'null'] }
+                            : col === 'price_type'
+                            ? {
+                                type: ['string', 'null'],
+                                enum: ['fixed', 'on_request', 'range', null],
+                              }
+                            : col === 'location_mode'
+                            ? {
+                                type: 'string',
+                                enum: [
+                                  'at_client',
+                                  'at_provider',
+                                  'remote',
+                                  'hybrid',
+                                ],
+                              }
+                            : { type: ['string', 'null'] },
+                        ])
+                      ),
+                      section_header_seen: { type: ['string', 'null'] },
+                    },
                     additionalProperties: false,
                   },
                 },
                 confidence: {
                   type: 'array',
                   description:
-                    'One confidence object per row, same indexing as rows.',
+                    'One confidence object per row in rows[]. Same index ordering.',
                   items: {
                     type: 'object',
                     properties: Object.fromEntries(
@@ -338,7 +275,7 @@ async function expandSection(
             },
           },
         ],
-        tool_choice: { type: 'tool', name: 'submit_section_rows' },
+        tool_choice: { type: 'tool', name: 'submit_window_rows' },
         messages: [
           {
             role: 'user',
@@ -349,16 +286,15 @@ async function expandSection(
                 source: {
                   type: 'base64',
                   media_type: 'application/pdf',
-                  data: slicedBuffer.toString('base64'),
+                  data: sliced.toString('base64'),
                 },
               },
               {
                 type: 'text',
                 text:
-                  `מקור: ${label} (סקציה "${section.header}", עמודים ${start}-${end})\n\n` +
-                  `חלץ את כל השירותים בסקציה "${section.header}".\n` +
-                  `כל מדרגת תמחור / וריאציה = שורה נפרדת.\n` +
-                  `חובה למלא location_mode בכל שורה (בחר אחד מ-at_client / at_provider / remote / hybrid — אסור null).`,
+                  `מקור: ${label} (עמודים ${windowStart}-${windowEnd})\n\n` +
+                  `חלץ את כל השירותים והווריאציות בעמודים האלה. ` +
+                  `כל מדרגת תמחור = שורה נפרדת. חובה למלא location_mode (אסור null) ו-section_header_seen בכל שורה.`,
               },
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             ] as any,
@@ -369,20 +305,25 @@ async function expandSection(
   )
 
   console.log(
-    `[${tag}] response stop_reason=${response.stop_reason}, blocks=[${response.content.map((c) => c.type).join(',')}]`
+    `[${tag}] stop_reason=${response.stop_reason}, blocks=[${response.content
+      .map((c) => c.type)
+      .join(',')}]`
   )
-
   if (response.stop_reason === 'max_tokens') {
     console.warn(`[${tag}] hit max_tokens — output may be partial`)
   }
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
-    console.warn(`[${tag}] no tool_use block returned`)
+    console.warn(`[${tag}] no tool_use block — content text:`)
+    for (const block of response.content) {
+      if (block.type === 'text') console.warn(`    ${block.text.slice(0, 200)}`)
+    }
     return []
   }
+
   const input = toolUse.input as {
-    rows?: CatalogRow[]
+    rows?: Array<CatalogRow & { section_header_seen?: string | null }>
     confidence?: Partial<Record<keyof CatalogRow, ConfidenceScore>>[]
   }
   if (!Array.isArray(input.rows)) {
@@ -392,38 +333,99 @@ async function expandSection(
     return []
   }
 
+  if (
+    input.confidence &&
+    Array.isArray(input.confidence) &&
+    input.confidence.length !== input.rows.length
+  ) {
+    console.warn(
+      `[${tag}] confidence/rows length mismatch (${input.confidence.length} vs ${input.rows.length}) — confidence will be undefined for mismatched indices`
+    )
+  }
+
   console.log(`[${tag}] ${input.rows.length} rows`)
 
-  return input.rows.map((row, i) => ({
-    ...row,
-    _confidence: input.confidence?.[i],
-  }))
+  return input.rows.map((row, i) => {
+    const { section_header_seen, ...rest } = row
+    return {
+      ...(rest as CatalogRow),
+      _section_header_seen: section_header_seen ?? null,
+      _confidence: input.confidence?.[i],
+    }
+  })
 }
 
-/**
- * Section-level retry. If the first attempt returned 0 rows (usually because
- * Pass A's page range missed where the section header lives), retry with
- * wider padding (+2 pages) to almost-guarantee the header is in the slice.
- */
-async function expandSectionWithRetry(
+// ── Section reconciliation (Pass 2) ──────────────────────────────────
+
+async function reconcileSections(
   client: Anthropic,
-  pdfBuffer: Buffer,
-  section: DocSection,
-  label: string,
-  totalPages: number
-): Promise<RowWithConfidence[]> {
-  const first = await expandSection(client, pdfBuffer, section, label, totalPages, 1)
-  if (first.length > 0) return first
+  observedHeaders: string[]
+): Promise<Record<string, string>> {
+  const unique = Array.from(new Set(observedHeaders.filter((h) => h && h.trim())))
+  if (unique.length === 0) return {}
+  if (unique.length === 1) return { [unique[0]]: unique[0] }
 
-  console.warn(
-    `[section:${section.header.slice(0, 30)}] returned 0 rows — retrying with wider page window`
+  console.log(`[reconcile] mapping ${unique.length} distinct observed headers`)
+
+  const response = await withRateLimitRetry(
+    () =>
+      client.messages.create({
+        model: RECONCILE_MODEL,
+        max_tokens: RECONCILE_MAX_TOKENS,
+        system: RECONCILE_SYSTEM,
+        tools: [
+          {
+            name: 'submit_mapping',
+            description:
+              'Submit the observed-to-canonical section header mapping.',
+            input_schema: {
+              type: 'object',
+              properties: {
+                mapping: {
+                  type: 'object',
+                  description:
+                    'Each observed header maps to its canonical form. Both must be strings from the input list.',
+                  additionalProperties: { type: 'string' },
+                },
+              },
+              required: ['mapping'],
+            },
+          },
+        ],
+        tool_choice: { type: 'tool', name: 'submit_mapping' },
+        messages: [
+          {
+            role: 'user',
+            content: `Observed section headers:\n${unique
+              .map((h) => `- ${h}`)
+              .join('\n')}\n\nReturn the observed_to_canonical mapping.`,
+          },
+        ],
+      }),
+    'reconcile'
   )
-  return expandSection(client, pdfBuffer, section, label, totalPages, 3)
+
+  const toolUse = response.content.find((c) => c.type === 'tool_use')
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    console.warn('[reconcile] no tool_use — falling back to identity mapping')
+    return Object.fromEntries(unique.map((h) => [h, h]))
+  }
+  const out = toolUse.input as { mapping?: Record<string, string> }
+  if (!out.mapping || typeof out.mapping !== 'object') {
+    console.warn('[reconcile] no mapping returned — falling back to identity')
+    return Object.fromEntries(unique.map((h) => [h, h]))
+  }
+  // Defensive: any observed header not in the returned mapping → identity.
+  const result: Record<string, string> = {}
+  for (const h of unique) result[h] = out.mapping[h] || h
+  const canonicalSet = new Set(Object.values(result))
+  console.log(
+    `[reconcile] ${unique.length} observed → ${canonicalSet.size} canonical: ${Array.from(canonicalSet).map((c) => `"${c}"`).join(', ')}`
+  )
+  return result
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Pass C — merge + validate
-// ──────────────────────────────────────────────────────────────────────
+// ── Merge + dedup (Pass 3, pure JS) ──────────────────────────────────
 
 function computeConfidenceAvg(
   conf: Partial<Record<keyof CatalogRow, ConfidenceScore>> | undefined
@@ -438,9 +440,11 @@ function computeConfidenceAvg(
 }
 
 function rowKey(r: CatalogRow): string {
-  // Category included so same-named services from different PDF sections
-  // don't collapse. location_mode included so the same service at different
-  // venues stays as separate rows.
+  // supplier_name + supplier_category + service_name + price + capacity
+  // + location + duration. Adding supplier_name closes the cross-supplier
+  // collision case the audit found; adding duration distinguishes same-
+  // price rows that differ only in hours (the bank-of-10h vs bank-of-20h
+  // case where price coincidentally equals another tier's price).
   return [
     r.supplier_name,
     r.supplier_category,
@@ -449,38 +453,40 @@ function rowKey(r: CatalogRow): string {
     r.capacity_min,
     r.capacity_max,
     r.location_mode,
+    r.duration_hours,
   ]
     .map((v) => (v == null ? '' : String(v)))
     .join('|')
     .toLowerCase()
 }
 
-export function mergeAndValidate(rows: RowWithConfidence[]): CatalogRow[] {
+export function mergeAndValidate(rows: WindowRow[]): CatalogRow[] {
   const seen = new Map<string, CatalogRow>()
+  let dropped = 0
   for (const row of rows) {
-    if (!row.service_name) continue
+    // Keep rows even with null service_name if they have a description or
+    // notes — the staging Sheet review pass can repair them.
+    if (!row.service_name && !row.service_description && !row.supplier_notes) {
+      dropped++
+      continue
+    }
     const key = rowKey(row)
     if (seen.has(key)) continue
     const merged: CatalogRow = {
       ...row,
       _confidence_avg: computeConfidenceAvg(row._confidence),
     }
+    // Strip internal field before returning.
+    delete (merged as WindowRow)._section_header_seen
     seen.set(key, merged)
+  }
+  if (dropped > 0) {
+    console.log(`[merge] dropped ${dropped} rows with no name/description/notes`)
   }
   return Array.from(seen.values())
 }
 
-/** Force every row's supplier_category to the canonical section header. */
-function pinCategory(
-  rows: RowWithConfidence[],
-  sectionHeader: string
-): RowWithConfidence[] {
-  return rows.map((r) => ({ ...r, supplier_category: sectionHeader }))
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Public entry
-// ──────────────────────────────────────────────────────────────────────
+// ── Public entry ─────────────────────────────────────────────────────
 
 export async function multipassPdf(
   client: Anthropic,
@@ -488,29 +494,50 @@ export async function multipassPdf(
   label: string
 ): Promise<CatalogRow[]> {
   const totalPages = (await PDFDocument.load(pdfBuffer)).getPageCount()
-  console.log(`[multipass] "${label}" (${totalPages} pages)`)
+  console.log(`[multipass] "${label}" ${totalPages} pages`)
 
-  const outline = await outlineSections(client, pdfBuffer, label, totalPages)
-  if (outline.sections.length === 0) return []
-
-  const expanded = await pMap(
-    outline.sections,
-    EXPAND_CONCURRENCY,
-    async (section) => {
-      const rows = await expandSectionWithRetry(
-        client,
-        pdfBuffer,
-        section,
-        label,
-        totalPages
-      )
-      return pinCategory(rows, section.header)
-    }
+  const windows = makeWindows(totalPages, WINDOW_SIZE, WINDOW_OVERLAP)
+  console.log(
+    `[multipass] ${windows.length} windows: ${windows.map(([s, e]) => `${s}-${e}`).join(', ')}`
   )
 
-  const merged = mergeAndValidate(expanded.flat())
+  // Pass 1: extract every window in parallel.
+  const windowRows = await pMap(
+    windows,
+    WINDOW_CONCURRENCY,
+    ([start, end]) => extractWindow(client, pdfBuffer, start, end, label),
+    'multipass.windows'
+  )
+  const allRows: WindowRow[] = windowRows.flat()
   console.log(
-    `[multipass] "${label}" -> ${merged.length} unique rows across ${outline.sections.length} sections`
+    `[multipass] window pass produced ${allRows.length} raw rows across ${windows.length} windows`
+  )
+
+  if (allRows.length === 0) {
+    console.warn('[multipass] window pass produced nothing — bailing')
+    return []
+  }
+
+  // Pass 2: reconcile section headers.
+  const observed = allRows
+    .map((r) => r._section_header_seen)
+    .filter((h): h is string => typeof h === 'string' && h.trim().length > 0)
+  const mapping = await reconcileSections(client, observed)
+
+  // Apply canonical category to every row.
+  for (const row of allRows) {
+    const seen = row._section_header_seen
+    if (seen && mapping[seen]) {
+      row.supplier_category = mapping[seen]
+    } else if (seen) {
+      row.supplier_category = seen
+    }
+  }
+
+  // Pass 3: merge + dedup.
+  const merged = mergeAndValidate(allRows)
+  console.log(
+    `[multipass] "${label}" -> ${merged.length} unique rows after dedup (from ${allRows.length} raw)`
   )
   return merged
 }
