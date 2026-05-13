@@ -33,7 +33,12 @@ export async function POST(req: Request) {
     // ── PASS 1: strict — all filters applied (categories, budget,
     //   participants, location, and text). Returns the most relevant
     //   in-filter rows first.
-    const { data: strictData, error: strictError } = await supabase.rpc('search_services', {
+    // Only include p_location_modes in the RPC call when the user has
+    // actually narrowed the selection — otherwise the param key is
+    // omitted entirely, which lets this route work against the older
+    // pre-007 RPC signature too (it will 404 if it sees an unknown
+    // named arg).
+    const rpcArgs: Record<string, unknown> = {
       p_query:             query || '',
       p_categories:        cats,
       p_total_budget:      total_budget || null,
@@ -41,10 +46,14 @@ export async function POST(req: Request) {
       p_participants:      participants || null,
       p_location:          location || null,
       p_limit:             60,
-      p_location_modes:    Array.isArray(location_modes) && location_modes.length > 0
-        ? location_modes
-        : null,
-    })
+    }
+    if (Array.isArray(location_modes) && location_modes.length > 0) {
+      rpcArgs.p_location_modes = location_modes
+    }
+    const { data: strictData, error: strictError } = await supabase.rpc(
+      'search_services',
+      rpcArgs
+    )
 
     if (strictError) {
       console.error('Supabase RPC error:', strictError)
