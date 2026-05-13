@@ -10,6 +10,7 @@ import {
   UtensilsCrossed,
   Dumbbell,
   Info,
+  AlertCircle,
 } from 'lucide-react'
 import SupplierCard from './SupplierCard'
 import SupplierModal from './SupplierModal'
@@ -112,7 +113,7 @@ function RelaxedSearchBanner({ strictCount, totalCount }: { strictCount: number;
 }
 
 export default function SupplierGrid() {
-  const { services, isLoading, relaxed, strictCount } = useServices()
+  const { services, isLoading, error, relaxed, strictCount } = useServices()
   const selectedService = useMarketplaceStore((s) => s.selectedService)
   const setSelectedService = useMarketplaceStore((s) => s.setSelectedService)
   const activeCategories = useMarketplaceStore((s) => s.activeCategories)
@@ -157,8 +158,30 @@ export default function SupplierGrid() {
         </div>
       )}
 
+      {/* Error state — surfaces /api/search failures explicitly so users
+          don't misread an outage as an empty result set. */}
+      {!isLoading && error && (
+        <div
+          className="flex items-start gap-3 py-8 px-5 bg-red-50 border border-red-200 rounded-xl"
+          role="alert"
+        >
+          <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 shrink-0" />
+          <div>
+            <h3 className="text-sm font-semibold text-red-900 mb-1">
+              לא הצלחנו לטעון את התוצאות
+            </h3>
+            <p className="text-sm text-red-700">
+              נסו שוב בעוד רגע, או דברו עם הקונסיירז&apos; שלנו.
+            </p>
+            <p className="text-xs text-red-600 mt-2 font-mono" dir="ltr">
+              {error}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!isLoading && services.length === 0 && (
+      {!isLoading && !error && services.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-4">
             <Search className="w-8 h-8 text-gray-400" />

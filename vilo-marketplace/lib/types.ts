@@ -1,5 +1,6 @@
 export type PricingUnit = 'person' | 'group' | 'hour' | 'project' | 'month' | 'unit'
 export type LocationType = 'onsite' | 'remote' | 'both'
+export type LocationMode = 'at_client' | 'at_provider' | 'remote' | 'hybrid'
 export type CategorySlug =
   | 'wellbeing'
   | 'teambuilding'
@@ -34,6 +35,7 @@ export interface Service {
   tags: string[] | null
   duration_minutes: number | null
   location_type: LocationType
+  location_mode?: LocationMode | null
   language: string
   min_participants: number | null
   max_participants: number | null

@@ -20,6 +20,7 @@ function mapRow(row: Record<string, unknown>): Service {
     max_participants: row.max_participants as number | null,
     duration_minutes: row.duration_minutes as number | null,
     location_type: (row.location_type as LocationType) || 'onsite',
+    location_mode: (row.location_mode as Service['location_mode']) ?? null,
     language: 'he',
     tags: null,
     notes: row.notes as string | null,

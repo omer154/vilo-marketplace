@@ -72,6 +72,7 @@ export function useServices() {
             max_participants: row.max_participants,
             duration_minutes: row.duration_minutes,
             location_type: row.location_type || 'onsite',
+            location_mode: (row.location_mode as string | null) ?? null,
             language: 'he',
             tags: null,
             notes: row.notes,

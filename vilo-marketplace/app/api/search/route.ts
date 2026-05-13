@@ -75,7 +75,7 @@ export async function POST(req: Request) {
         const { data: svcs } = await supabase
           .from('services')
           .select(
-            'id, supplier_id, service_name, category_primary, category_secondary, description_short, price, pricing_unit, min_participants, max_participants, duration_minutes, location_type, notes'
+            'id, supplier_id, service_name, category_primary, category_secondary, description_short, price, pricing_unit, min_participants, max_participants, duration_minutes, location_type, location_mode, notes'
           )
           .in('supplier_id', supplierIds)
           .eq('is_active', true)

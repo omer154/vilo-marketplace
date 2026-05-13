@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Clock, Users, Coins, MapPin } from 'lucide-react'
 import {
@@ -59,6 +59,11 @@ const LOCATION_HE: Record<string, string> = {
   onsite: 'באתר הלקוח',
   remote: 'מרחוק',
   both: 'גמיש',
+  // Newer location_mode values (migration 002). Surfaced here so the
+  // richer at_client / at_provider distinction reaches the user.
+  at_client: 'מגיעים אליכם',
+  at_provider: 'אצל הספק',
+  hybrid: 'גמיש — אצלכם או אצל הספק',
 }
 
 interface SupplierModalProps {
@@ -69,10 +74,34 @@ interface SupplierModalProps {
 export default function SupplierModal({ service, onClose }: SupplierModalProps) {
   const cat = CATEGORY_META[service.category_primary]
   const CatIcon = cat ? CATEGORY_ICON_MAP[cat.icon] : null
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+  const titleId = `service-${service.id}-title`
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      // Trap Tab inside the dialog so screen-reader / keyboard users
+      // can't accidentally tab into the background page while the
+      // modal is open.
+      if (e.key !== 'Tab' || !dialogRef.current) return
+      const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement as HTMLElement | null
+      if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
     },
     [onClose]
   )
@@ -95,6 +124,14 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
     document.body.style.top = `-${scrollY}px`
     document.body.style.width = '100%'
 
+    // Move focus into the dialog and remember where it came from so we
+    // can restore it on close (a11y baseline for any modal).
+    previousFocusRef.current = document.activeElement as HTMLElement | null
+    const firstFocusable = dialogRef.current?.querySelector<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+    firstFocusable?.focus()
+
     return () => {
       document.removeEventListener('keydown', handleKeyDown)
       document.body.style.overflow = prev.overflow
@@ -102,6 +139,7 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
       document.body.style.top = prev.top
       document.body.style.width = prev.width
       window.scrollTo(0, scrollY)
+      previousFocusRef.current?.focus?.()
     }
   }, [handleKeyDown])
 
@@ -124,6 +162,10 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
         onClick={onClose}
       >
         <motion.div
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
@@ -134,6 +176,7 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
           {/* Close button */}
           <button
             onClick={onClose}
+            aria-label="סגור"
             className="absolute top-4 left-4 w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           >
             <X className="w-4 h-4 text-gray-600" />
@@ -150,7 +193,7 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
           )}
 
           {/* Title */}
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">
+          <h2 id={titleId} className="text-2xl font-bold text-gray-900 mb-2">
             {service.service_name}
           </h2>
 
@@ -228,7 +271,12 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
                 מיקום
               </div>
               <div className="font-semibold text-gray-900">
-                {LOCATION_HE[service.location_type] || service.location_type}
+                {/* Prefer the richer location_mode (at_client / at_provider /
+                    remote / hybrid) when available, fall back to the legacy
+                    location_type for un-migrated rows. */}
+                {LOCATION_HE[service.location_mode || ''] ||
+                  LOCATION_HE[service.location_type] ||
+                  service.location_type}
               </div>
             </div>
           </div>
