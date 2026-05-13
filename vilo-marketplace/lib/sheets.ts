@@ -37,6 +37,10 @@ const SHEET_HEADERS = [
   'location_mode',
   'tags',
   'supplier_notes',
+  // pricing_unit added 2026-05-13 so the budget filter on the
+  // marketplace works for synced rows. Appended at the end so existing
+  // staging rows (which lack this column) keep their column alignment.
+  'pricing_unit',
 ] as const
 
 export interface SheetsConfig {
@@ -230,6 +234,19 @@ export async function readStagingRows(
         if (v === 'fixed' || v === 'on_request' || v === 'range') return v
         return null
       })(),
+      pricing_unit: (() => {
+        const v = parseCell(get(row, 'pricing_unit'))?.toLowerCase()
+        if (
+          v === 'person' ||
+          v === 'group' ||
+          v === 'hour' ||
+          v === 'project' ||
+          v === 'month' ||
+          v === 'unit'
+        )
+          return v
+        return null
+      })(),
       price_min: parseNumber(get(row, 'price_min')),
       price_max: parseNumber(get(row, 'price_max')),
       capacity_min: parseInt32(get(row, 'capacity_min')),
@@ -311,6 +328,7 @@ export async function appendCatalogRows(
     fmt(r.location_mode),
     fmt(r.tags),
     fmt(r.supplier_notes),
+    fmt(r.pricing_unit),
   ])
 
   await sheets.spreadsheets.values.append({

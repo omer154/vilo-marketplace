@@ -69,6 +69,15 @@ const EXTRACT_SYSTEM = `אתה מחלץ שירותים מתוך חלון של מ
 
 price_type: 'fixed' למחיר בודד, 'range' לטווח, 'on_request' אם אין מחיר ספציפי.
 
+pricing_unit — חובה למלא כשיש price_ils. בחר אחד:
+- person = המחיר הוא לאדם / למשתתף (לדוגמה "₪80 לאדם", "₪150 למשתתף")
+- group = המחיר הוא לקבוצה / לפעילות שלמה (לדוגמה "₪3000 לקבוצה", "₪5000 לפעילות")
+- hour = המחיר הוא לשעת עבודה (לדוגמה "₪400 לשעה")
+- project = המחיר הוא לפרויקט שלם / לחבילת ליווי
+- month = המחיר הוא חודשי
+- unit = המחיר הוא ליחידה פיזית (משחק, ערכה, מתנה)
+ברירת מחדל: אם לא ברור, נסה להסיק לפי ההקשר. הרצאה לקבוצה → group. ייעוץ פרטני לשעה → hour. מתנה / משחק → unit.
+
 confidence (1-5 לכל שדה):
 - 5 = הערך מפורש במסמך
 - 4 = ברור מהקשר
@@ -236,6 +245,19 @@ async function extractWindow(
                             ? {
                                 type: ['string', 'null'],
                                 enum: ['fixed', 'on_request', 'range', null],
+                              }
+                            : col === 'pricing_unit'
+                            ? {
+                                type: ['string', 'null'],
+                                enum: [
+                                  'person',
+                                  'group',
+                                  'hour',
+                                  'project',
+                                  'month',
+                                  'unit',
+                                  null,
+                                ],
                               }
                             : col === 'location_mode'
                             ? {

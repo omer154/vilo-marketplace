@@ -255,6 +255,7 @@ async function upsertOneRow(
     category_secondary: row.supplier_category,
     description_short: row.service_description?.slice(0, 200) || null,
     price: row.price_ils,
+    pricing_unit: row.pricing_unit,
     min_participants: row.capacity_min,
     max_participants: row.capacity_max,
     duration_minutes: durationMinutes,

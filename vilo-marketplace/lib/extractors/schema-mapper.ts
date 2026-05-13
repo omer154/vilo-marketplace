@@ -279,22 +279,24 @@ export function applySchemaToRows(
     // If we extracted a price and no explicit price_type, infer one.
     if (r.price_ils != null && !r.price_type) r.price_type = 'fixed'
 
-    // Stash any pricing-unit-like column into supplier_notes if no mapping
-    // landed it elsewhere — out-of-schema today but informative for review.
-    // (Pricing unit isn't in CatalogRow today; surface via notes for now.)
-    for (const [srcCol, rawVal] of Object.entries(row)) {
-      if (schema.pricing_unit_mappings[String(rawVal)]) {
-        const unit = schema.pricing_unit_mappings[String(rawVal)]
-        const tag = `[unit: ${unit}]`
-        if (r.supplier_notes && !r.supplier_notes.includes(tag)) {
-          r.supplier_notes = `${tag} ${r.supplier_notes}`
-        } else if (!r.supplier_notes) {
-          r.supplier_notes = tag
-        }
+    // Map any pricing-unit-like value through the LLM-suggested mappings
+    // into CatalogRow.pricing_unit. The marketplace's budget filter
+    // depends on this — a synced per-person row with pricing_unit=NULL
+    // gets compared against the *total* budget instead of per-person.
+    for (const rawVal of Object.values(row)) {
+      const mapped = schema.pricing_unit_mappings[String(rawVal)]
+      if (!mapped) continue
+      if (
+        mapped === 'person' ||
+        mapped === 'group' ||
+        mapped === 'hour' ||
+        mapped === 'project' ||
+        mapped === 'month' ||
+        mapped === 'unit'
+      ) {
+        r.pricing_unit = mapped
         break
       }
-      // suppress unused-var lint
-      void srcCol
     }
 
     // Backfill every catalog column with null so callers don't need to
@@ -309,6 +311,7 @@ export function applySchemaToRows(
       service_name: r.service_name ?? null,
       service_description: r.service_description ?? null,
       price_ils: r.price_ils ?? null,
+      pricing_unit: r.pricing_unit ?? null,
       price_type: r.price_type ?? null,
       price_min: r.price_min ?? null,
       price_max: r.price_max ?? null,

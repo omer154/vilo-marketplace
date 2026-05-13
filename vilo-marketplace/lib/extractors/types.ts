@@ -14,6 +14,16 @@ export type ConfidenceScore = 1 | 2 | 3 | 4 | 5
  */
 export type LocationMode = 'at_client' | 'at_provider' | 'remote' | 'hybrid'
 
+/** What the price is *for*. Mirrors the marketplace PricingUnit but kept
+ *  redundantly here so the extractor + sync don't import from app code. */
+export type PricingUnit =
+  | 'person'
+  | 'group'
+  | 'hour'
+  | 'project'
+  | 'month'
+  | 'unit'
+
 export interface CatalogRow {
   supplier_id: string | null
   supplier_name: string | null
@@ -27,6 +37,10 @@ export interface CatalogRow {
   price_type: 'fixed' | 'on_request' | 'range' | null
   price_min: number | null
   price_max: number | null
+  /** What price_ils / price_min / price_max are charged *per*. Without
+   *  this, the marketplace's budget filter treats every synced row as
+   *  group-priced, which lets per-person services slip past. */
+  pricing_unit: PricingUnit | null
   capacity_min: number | null
   capacity_max: number | null
   duration_hours: number | null
@@ -61,6 +75,7 @@ export const CATALOG_COLUMNS: (keyof CatalogRow)[] = [
   'price_type',
   'price_min',
   'price_max',
+  'pricing_unit',
   'capacity_min',
   'capacity_max',
   'duration_hours',
