@@ -39,6 +39,12 @@ interface MarketplaceStore {
   toasts: ToastEntry[]
   pushToast: (message: string, kind?: ToastEntry['kind']) => void
   dismissToast: (id: string) => void
+
+  // Admin viewer mode — true when the marketplace is being browsed by a
+  // signed-in admin. Hydrated once via /api/admin/me and used to render
+  // inline edit affordances on cards / modal.
+  isAdmin: boolean
+  setIsAdmin: (v: boolean) => void
 }
 
 interface FilterKeys {
@@ -131,4 +137,8 @@ export const useMarketplaceStore = create<MarketplaceStore>((set) => ({
   },
   dismissToast: (id) =>
     set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
+
+  // Admin
+  isAdmin: false,
+  setIsAdmin: (v) => set({ isAdmin: v }),
 }))

@@ -1,7 +1,8 @@
 'use client'
 
+import Link from 'next/link'
 import { motion } from 'framer-motion'
-import { Clock, Users as UsersIcon, Coins, CheckCircle } from 'lucide-react'
+import { Clock, Users as UsersIcon, Coins, CheckCircle, Pencil } from 'lucide-react'
 import {
   Heart,
   Users,
@@ -97,6 +98,7 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
 
   const totalBudget = useMarketplaceStore((s) => s.totalBudget)
   const participantsCount = useMarketplaceStore((s) => s.participantsCount)
+  const isAdmin = useMarketplaceStore((s) => s.isAdmin)
 
   const participantsText =
     service.min_participants != null && service.max_participants != null
@@ -121,8 +123,24 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
       whileHover={{ scale: 1.015 }}
       transition={{ duration: 0.2 }}
       onClick={onClick}
-      className="group bg-white rounded-xl border border-gray-100 shadow-card hover:shadow-card-hover transition-all duration-200 cursor-pointer overflow-hidden"
+      className="group relative bg-white rounded-xl border border-gray-100 shadow-card hover:shadow-card-hover transition-all duration-200 cursor-pointer overflow-hidden"
     >
+      {/* Admin-only edit pencil. Top-left in RTL is the "trailing" corner
+          — same visual placement as the close-X in the modal. Stops
+          propagation so clicking the pencil doesn't also open the
+          modal. */}
+      {isAdmin && (
+        <Link
+          href={`/admin/services/${service.id}`}
+          onClick={(e) => e.stopPropagation()}
+          aria-label="ערוך שירות"
+          title="ערוך שירות"
+          className="absolute top-2 left-2 z-10 w-7 h-7 rounded-full bg-white/95 border border-gray-200 shadow-sm flex items-center justify-center text-gray-500 hover:bg-gray-900 hover:text-white hover:border-gray-900 transition-colors"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </Link>
+      )}
+
       <div className="p-5 space-y-3">
         {/* Category badge + context badges */}
         <div className="flex items-center gap-2 flex-wrap">

@@ -2,6 +2,7 @@
 
 import Header from '@/components/layout/Header'
 import Sidebar from '@/components/layout/Sidebar'
+import AdminProbe from '@/components/layout/AdminProbe'
 import CategoryPills from '@/components/marketplace/CategoryPills'
 import SupplierGrid from '@/components/marketplace/SupplierGrid'
 import ConciergeBar from '@/components/concierge/ConciergeBar'
@@ -10,6 +11,7 @@ import ConciergePanel from '@/components/concierge/ConciergePanel'
 export default function MarketplacePage() {
   return (
     <div className="min-h-screen">
+      <AdminProbe />
       <Header />
       <CategoryPills />
 

@@ -1,8 +1,10 @@
 'use client'
 
+import Link from 'next/link'
 import { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Clock, Users, Coins, MapPin } from 'lucide-react'
+import { X, Clock, Users, Coins, MapPin, Pencil } from 'lucide-react'
+import { useMarketplaceStore } from '@/store/marketplaceStore'
 import {
   Heart,
   Users as UsersGroup,
@@ -77,6 +79,7 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
   const dialogRef = useRef<HTMLDivElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const titleId = `service-${service.id}-title`
+  const isAdmin = useMarketplaceStore((s) => s.isAdmin)
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -288,17 +291,30 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
             </div>
           )}
 
-          {/* CTA */}
-          <a
-            href={
-              service.supplier_name
-                ? `mailto:info@vilo.co.il?subject=פנייה בנוגע ל${service.service_name} - ${service.supplier_name}`
-                : undefined
-            }
-            className="block w-full text-center bg-brand-500 hover:bg-brand-600 text-white rounded-xl py-3 font-medium transition-colors"
-          >
-            לפרטים נוספים פנו ל-Vilo
-          </a>
+          {/* CTA + admin edit */}
+          <div className={isAdmin ? 'flex gap-2' : ''}>
+            <a
+              href={
+                service.supplier_name
+                  ? `mailto:info@vilo.co.il?subject=פנייה בנוגע ל${service.service_name} - ${service.supplier_name}`
+                  : undefined
+              }
+              className="block flex-1 text-center bg-brand-500 hover:bg-brand-600 text-white rounded-xl py-3 font-medium transition-colors"
+            >
+              לפרטים נוספים פנו ל-Vilo
+            </a>
+            {isAdmin && (
+              <Link
+                href={`/admin/services/${service.id}`}
+                aria-label="ערוך שירות"
+                title="ערוך שירות (אדמין)"
+                className="inline-flex items-center gap-2 bg-gray-900 hover:bg-gray-800 text-white rounded-xl px-4 py-3 font-medium transition-colors"
+              >
+                <Pencil className="w-4 h-4" />
+                ערוך
+              </Link>
+            )}
+          </div>
         </motion.div>
       </motion.div>
     </AnimatePresence>
