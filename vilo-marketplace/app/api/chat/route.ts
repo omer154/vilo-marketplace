@@ -141,7 +141,12 @@ export async function POST(req: Request) {
         ? Math.floor(intent.totalBudget / intent.participants)
         : null
 
-    // Do two searches: one strict, one broad (for diverse recommendations)
+    // Do two searches: one strict (text + category + budget + participants
+    // + location), one broad (text only). The broad search intentionally
+    // drops the category filter so text-matched services still surface
+    // when the regex-based intent extractor and the synced data disagree
+    // on the canonical category slug (e.g. user types "סדנה" → 'learning'
+    // but the matching services are actually mapped to 'wellbeing').
     const [strictRes, broadRes] = await Promise.all([
       supabase.rpc('search_services', {
         p_query: intent.query,
@@ -154,12 +159,12 @@ export async function POST(req: Request) {
       }),
       supabase.rpc('search_services', {
         p_query: intent.query,
-        p_categories: intent.categories,
+        p_categories: null,
         p_total_budget: null,
         p_budget_per_person: null,
         p_participants: null,
         p_location: null,
-        p_limit: 15,
+        p_limit: 20,
       }),
     ])
 
@@ -176,10 +181,11 @@ export async function POST(req: Request) {
       }
     }
 
-    // ── FALLBACK: If few results, do a wide-open search so the concierge
-    //    always has services to recommend creatively ──────────────────
-    if (allServices.length < 5) {
-      // Try category-only search (drop text query)
+    // ── FALLBACK: If few results, try category-only search WITHOUT a
+    //    category filter (since the intent extractor's category guess
+    //    may be wrong for newly-synced services). Returns popular rows
+    //    that the concierge can pivot off creatively.
+    if (allServices.length < 5 && intent.categories && intent.categories.length > 0) {
       const { data: catFallback } = await supabase.rpc('search_services', {
         p_query: '',
         p_categories: intent.categories,
