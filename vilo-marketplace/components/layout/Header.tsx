@@ -8,6 +8,7 @@ export default function Header() {
   const setFilter = useMarketplaceStore((s) => s.setFilter)
   const applyAIFilters = useMarketplaceStore((s) => s.applyAIFilters)
   const openConcierge = useMarketplaceStore((s) => s.openConcierge)
+  const pushToast = useMarketplaceStore((s) => s.pushToast)
   const [searchValue, setSearchValue] = useState('')
   const [isExtracting, setIsExtracting] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -46,14 +47,25 @@ export default function Header() {
           explanation: `חיפוש AI: "${searchValue.trim()}"`,
         })
       } else {
+        // Intent API failed (rate limit, 5xx, etc). Fall back to plain
+        // text search and tell the user — otherwise the AI sparkle icon
+        // silently degrades and they can't tell anything went wrong.
+        pushToast(
+          'חיפוש ה-AI נכשל — עברתי לחיפוש טקסט רגיל. נסו שוב או דברו עם הקונסיירז׳.',
+          'error'
+        )
         setFilter('searchQuery', searchValue.trim())
       }
     } catch {
+      pushToast(
+        'לא הצלחנו להתחבר לחיפוש ה-AI — עברתי לחיפוש טקסט רגיל.',
+        'error'
+      )
       setFilter('searchQuery', searchValue.trim())
     } finally {
       setIsExtracting(false)
     }
-  }, [searchValue, applyAIFilters, setFilter])
+  }, [searchValue, applyAIFilters, setFilter, pushToast])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

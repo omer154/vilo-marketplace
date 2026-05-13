@@ -142,6 +142,21 @@ function slugify(s: string): string {
     .slice(0, 60)
 }
 
+/** Normalize a Hebrew/English supplier name so that "רות גנאל",
+ *  "רות גנאל " and "רות  גנאל" all collapse to the same lookup key.
+ *  - NFKC unicode normalization (composed forms, compatibility chars)
+ *  - strip Hebrew niqqud / cantillation marks (U+0591..U+05C7)
+ *  - collapse any run of whitespace to a single ASCII space
+ *  - strip surrounding whitespace
+ */
+function normalizeSupplierName(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[֑-ׇ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 async function findOrCreateSupplier(
   supabase: SupabaseClient,
   row: StagingRow,
@@ -150,17 +165,36 @@ async function findOrCreateSupplier(
   if (!row.supplier_name) {
     return { error: 'row has no supplier_name' }
   }
-  const name = row.supplier_name.trim()
+  const name = normalizeSupplierName(row.supplier_name)
+  if (!name) return { error: 'supplier_name normalized to empty string' }
 
+  // Exact-match first (covers everything already canonicalised).
   const { data: existing, error: findErr } = await supabase
     .from('suppliers')
-    .select('id')
+    .select('id, name')
     .eq('name', name)
     .limit(1)
     .maybeSingle()
 
   if (findErr) return { error: `supplier lookup failed: ${findErr.message}` }
   if (existing) return { id: existing.id, created: false }
+
+  // Fallback: case-insensitive match in case the existing row was inserted
+  // before normalization landed (legacy seed data, manual inserts). Avoids
+  // creating a duplicate supplier for "Ruth Ganel" vs "ruth ganel" etc.
+  const { data: ciMatch, error: ciErr } = await supabase
+    .from('suppliers')
+    .select('id, name')
+    .ilike('name', name)
+    .limit(1)
+    .maybeSingle()
+  if (ciErr) return { error: `supplier ilike lookup failed: ${ciErr.message}` }
+  if (ciMatch) {
+    console.log(
+      `[sync] supplier "${row.supplier_name}" matched existing "${ciMatch.name}" via case-insensitive lookup`
+    )
+    return { id: ciMatch.id, created: false }
+  }
 
   // Build payload using only columns the DB actually has — keeps the sync
   // working when a migration column hasn't landed yet.

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import Toaster from '@/components/layout/Toaster'
 
 export const metadata: Metadata = {
   title: 'Vilo Marketplace',
@@ -19,7 +20,10 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="font-sans">{children}</body>
+      <body className="font-sans">
+        {children}
+        <Toaster />
+      </body>
     </html>
   )
 }

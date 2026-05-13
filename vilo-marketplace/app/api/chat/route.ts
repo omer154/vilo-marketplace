@@ -231,13 +231,26 @@ export async function POST(req: Request) {
     // Send retrieved service IDs upfront so client can display cards
     const servicePayload = allServices.slice(0, 20)
 
+    // Map regex-intent categories ("teambuilding" etc) onto the same shape
+    // the client store uses for filters. Strings only — the client trusts
+    // its own CategorySlug type so we don't validate here.
+    const intentPayload = {
+      query: intent.query || null,
+      categories: intent.categories,
+      totalBudget: intent.totalBudget,
+      participants: intent.participants,
+      location: intent.location,
+    }
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          // Send retrieved services metadata first
+          // Send retrieved services + parsed intent upfront so client can
+          // both display cards AND sync its filter chips to what the AI
+          // actually heard.
           controller.enqueue(
             encoder.encode(
-              `data: ${JSON.stringify({ services: servicePayload })}\n\n`
+              `data: ${JSON.stringify({ services: servicePayload, intent: intentPayload })}\n\n`
             )
           )
 

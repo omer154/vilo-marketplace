@@ -1,6 +1,12 @@
 import { create } from 'zustand'
 import type { CategorySlug, LocationType, ChatMessage, Service } from '@/lib/types'
 
+export interface ToastEntry {
+  id: string
+  message: string
+  kind: 'error' | 'info' | 'success'
+}
+
 interface MarketplaceStore {
   // Filters
   activeCategories: CategorySlug[]
@@ -28,6 +34,11 @@ interface MarketplaceStore {
   // UI
   selectedService: Service | null
   setSelectedService: (s: Service | null) => void
+
+  // Toasts (non-blocking notifications)
+  toasts: ToastEntry[]
+  pushToast: (message: string, kind?: ToastEntry['kind']) => void
+  dismissToast: (id: string) => void
 }
 
 interface FilterKeys {
@@ -108,4 +119,16 @@ export const useMarketplaceStore = create<MarketplaceStore>((set) => ({
   // UI
   selectedService: null,
   setSelectedService: (s) => set({ selectedService: s }),
+
+  // Toasts
+  toasts: [],
+  pushToast: (message, kind = 'info') => {
+    const id =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `t_${Date.now()}_${Math.random()}`
+    set((state) => ({ toasts: [...state.toasts, { id, message, kind }] }))
+  },
+  dismissToast: (id) =>
+    set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
 }))

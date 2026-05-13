@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import type { ChatMessage, Service, CategorySlug, LocationType } from '@/lib/types'
 
@@ -26,12 +26,28 @@ function mapRow(row: Record<string, unknown>): Service {
   }
 }
 
+interface ChatIntent {
+  query?: string
+  categories?: CategorySlug[] | null
+  totalBudget?: number | null
+  participants?: number | null
+  location?: LocationType | null
+}
+
 export function useConcierge() {
   const [isStreaming, setIsStreaming] = useState(false)
   const chatMessages = useMarketplaceStore((s) => s.chatMessages)
   const addMessage = useMarketplaceStore((s) => s.addMessage)
   const applyAIFilters = useMarketplaceStore((s) => s.applyAIFilters)
   const abortRef = useRef<AbortController | null>(null)
+
+  // Abort any in-flight SSE stream on unmount so we don't keep writing to
+  // a stale store after navigation, and we don't leak the fetch + reader.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
 
   const sendMessage = useCallback(
     async (text: string) => {
@@ -72,6 +88,7 @@ export function useConcierge() {
       history.push({ role: 'user', content: text.slice(0, 2000) })
 
       let retrievedServices: Service[] = []
+      let chatIntent: ChatIntent | null = null
 
       try {
         abortRef.current = new AbortController()
@@ -114,6 +131,14 @@ export function useConcierge() {
                   .map(mapRow)
               }
 
+              // Server now ships the parsed intent alongside services so the
+              // main grid can sync its budget / participants / location
+              // filters to what the AI actually heard — not just the
+              // categories of the result set.
+              if (parsed.intent) {
+                chatIntent = parsed.intent as ChatIntent
+              }
+
               if (parsed.text) {
                 fullText += parsed.text
                 // Update the AI message in store with accumulated text
@@ -135,21 +160,48 @@ export function useConcierge() {
                   )
                   useMarketplaceStore.setState({ chatMessages: updatedMsgs })
 
-                  // Apply filters to main marketplace grid
-                  applyAIFilters({
-                    categories: retrievedServices
-                      .map((s) => s.category_primary)
-                      .filter((v, i, a) => a.indexOf(v) === i) as CategorySlug[],
-                  })
+                  // Apply intent if the server reported one, otherwise fall
+                  // back to the union of result-set categories.
+                  if (chatIntent) {
+                    const intentCats = (chatIntent.categories ?? null) as
+                      | CategorySlug[]
+                      | null
+                    applyAIFilters({
+                      categories: intentCats && intentCats.length > 0
+                        ? intentCats
+                        : (retrievedServices
+                            .map((s) => s.category_primary)
+                            .filter((v, i, a) => a.indexOf(v) === i) as CategorySlug[]),
+                      total_budget: chatIntent.totalBudget ?? null,
+                      participants: chatIntent.participants ?? null,
+                      location: chatIntent.location ?? null,
+                      query: chatIntent.query,
+                    })
+                  } else {
+                    applyAIFilters({
+                      categories: retrievedServices
+                        .map((s) => s.category_primary)
+                        .filter((v, i, a) => a.indexOf(v) === i) as CategorySlug[],
+                    })
+                  }
                 }
               }
 
               if (parsed.error) {
                 console.error('Chat API error:', parsed.error)
+                // Drop any retrieved-services cards we'd attached so far —
+                // they came from a successful first SSE frame but the
+                // Anthropic call after them blew up. Leaving them attached
+                // implies the search succeeded, which is misleading.
+                retrievedServices = []
                 const msgs = useMarketplaceStore.getState().chatMessages
                 const updated = msgs.map((m) =>
                   m.id === aiMsgId
-                    ? { ...m, content: `מצטער, אירעה שגיאה: ${parsed.error}` }
+                    ? {
+                        ...m,
+                        content: `מצטער, אירעה שגיאה: ${parsed.error}`,
+                        matchedServices: undefined,
+                      }
                     : m
                 )
                 useMarketplaceStore.setState({ chatMessages: updated })
@@ -164,7 +216,11 @@ export function useConcierge() {
           const msgs = useMarketplaceStore.getState().chatMessages
           const updated = msgs.map((m) =>
             m.id === aiMsgId
-              ? { ...m, content: 'מצטער, לא הצלחתי להתחבר. אנא נסה שנית.' }
+              ? {
+                  ...m,
+                  content: 'מצטער, לא הצלחתי להתחבר. אנא נסה שנית.',
+                  matchedServices: undefined,
+                }
               : m
           )
           useMarketplaceStore.setState({ chatMessages: updated })

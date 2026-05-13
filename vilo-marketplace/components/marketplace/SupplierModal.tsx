@@ -79,10 +79,29 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
 
   useEffect(() => {
     document.addEventListener('keydown', handleKeyDown)
+
+    // Lock background scroll without jumping to top. iOS / mobile Safari
+    // will scroll to top on overflow:hidden unless we fix the body
+    // position with the current scrollY offset, then restore it on close.
+    const scrollY = window.scrollY
+    const prev = {
+      overflow: document.body.style.overflow,
+      position: document.body.style.position,
+      top: document.body.style.top,
+      width: document.body.style.width,
+    }
     document.body.style.overflow = 'hidden'
+    document.body.style.position = 'fixed'
+    document.body.style.top = `-${scrollY}px`
+    document.body.style.width = '100%'
+
     return () => {
       document.removeEventListener('keydown', handleKeyDown)
-      document.body.style.overflow = ''
+      document.body.style.overflow = prev.overflow
+      document.body.style.position = prev.position
+      document.body.style.top = prev.top
+      document.body.style.width = prev.width
+      window.scrollTo(0, scrollY)
     }
   }, [handleKeyDown])
 
