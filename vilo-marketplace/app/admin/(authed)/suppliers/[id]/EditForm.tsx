@@ -1,8 +1,8 @@
 'use client'
 
-import { useState, FormEvent } from 'react'
+import { useState, FormEvent, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, Save, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Loader2, Save, CheckCircle2, AlertCircle, Upload, Trash2 } from 'lucide-react'
 
 interface SupplierRow {
   id: string
@@ -16,10 +16,17 @@ interface SupplierRow {
   is_active: boolean
 }
 
+type LogoState =
+  | { kind: 'idle' }
+  | { kind: 'uploading' }
+  | { kind: 'error'; message: string }
+
 export default function SupplierEditForm({ row }: { row: SupplierRow }) {
   const router = useRouter()
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [logoState, setLogoState] = useState<LogoState>({ kind: 'idle' })
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [form, setForm] = useState({
     name: row.name || '',
     name_en: row.name_en || '',
@@ -32,6 +39,49 @@ export default function SupplierEditForm({ row }: { row: SupplierRow }) {
 
   const update = (k: keyof typeof form, v: string) =>
     setForm((f) => ({ ...f, [k]: v }))
+
+  const handleLogoFile = async (file: File) => {
+    setLogoState({ kind: 'uploading' })
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(`/api/admin/suppliers/${row.id}/logo`, {
+        method: 'POST',
+        body: fd,
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+      update('logo_url', json.logo_url as string)
+      setLogoState({ kind: 'idle' })
+      router.refresh()
+    } catch (err) {
+      setLogoState({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'unknown error',
+      })
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const handleLogoRemove = async () => {
+    setLogoState({ kind: 'uploading' })
+    try {
+      const res = await fetch(`/api/admin/suppliers/${row.id}/logo`, {
+        method: 'DELETE',
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+      update('logo_url', '')
+      setLogoState({ kind: 'idle' })
+      router.refresh()
+    } catch (err) {
+      setLogoState({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'unknown error',
+      })
+    }
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -129,26 +179,90 @@ export default function SupplierEditForm({ row }: { row: SupplierRow }) {
           />
         </Field>
 
-        <Field label="לוגו (URL — Phase 2d יוסיף העלאת קובץ)">
-          <input
-            type="url"
-            value={form.logo_url}
-            onChange={(e) => update('logo_url', e.target.value)}
-            className="input"
-            dir="ltr"
-            placeholder="https://..."
-          />
-          {form.logo_url && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={form.logo_url}
-              alt="logo preview"
-              className="mt-2 w-16 h-16 rounded-lg object-cover border border-gray-200"
-              onError={(e) => {
-                ;(e.currentTarget as HTMLImageElement).style.display = 'none'
-              }}
-            />
-          )}
+        <Field label="לוגו">
+          <div className="flex items-start gap-4">
+            <div className="w-20 h-20 rounded-lg border border-gray-200 bg-gray-50 flex items-center justify-center overflow-hidden shrink-0">
+              {form.logo_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={form.logo_url}
+                  alt="logo preview"
+                  className="w-full h-full object-cover"
+                  onError={(e) => {
+                    ;(e.currentTarget as HTMLImageElement).style.display = 'none'
+                  }}
+                />
+              ) : (
+                <span className="text-2xl text-gray-400 font-semibold">
+                  {form.name?.[0] || '?'}
+                </span>
+              )}
+            </div>
+            <div className="flex-1 space-y-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={logoState.kind === 'uploading'}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-gray-900 hover:bg-gray-800 text-white rounded-lg disabled:opacity-50"
+                >
+                  {logoState.kind === 'uploading' ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      מעלה...
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-3.5 h-3.5" />
+                      העלה קובץ
+                    </>
+                  )}
+                </button>
+                {form.logo_url && logoState.kind !== 'uploading' && (
+                  <button
+                    type="button"
+                    onClick={handleLogoRemove}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-700 hover:text-red-700 hover:bg-red-50 rounded-lg"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    הסר
+                  </button>
+                )}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) handleLogoFile(f)
+                  }}
+                  className="hidden"
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                PNG / JPG / WebP / SVG, עד 2MB. גודל מומלץ ≥ 256×256.
+              </p>
+              {logoState.kind === 'error' && (
+                <p className="text-xs text-red-700 flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" />
+                  {logoState.message}
+                </p>
+              )}
+              <details className="text-xs">
+                <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
+                  או הזינו URL חיצוני
+                </summary>
+                <input
+                  type="url"
+                  value={form.logo_url}
+                  onChange={(e) => update('logo_url', e.target.value)}
+                  className="input mt-1"
+                  dir="ltr"
+                  placeholder="https://..."
+                />
+              </details>
+            </div>
+          </div>
         </Field>
       </div>
 
