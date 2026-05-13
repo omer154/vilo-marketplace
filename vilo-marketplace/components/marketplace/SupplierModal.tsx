@@ -150,15 +150,28 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
           )}
 
           {/* Title */}
-          <h2 className="text-2xl font-bold text-gray-900 mb-1">
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">
             {service.service_name}
           </h2>
 
-          {/* Subtitle */}
-          <p className="text-sm text-gray-500 mb-6">
-            {service.supplier_name}
-            {service.category_secondary && ` · ${service.category_secondary}`}
-          </p>
+          {/* Supplier row — logo + name + sub-category */}
+          <div className="flex items-center gap-2 mb-6">
+            {service.supplier_logo_url && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={service.supplier_logo_url}
+                alt={service.supplier_name || ''}
+                className="w-8 h-8 rounded-full object-cover bg-white border border-gray-100 shrink-0"
+                onError={(e) => {
+                  ;(e.currentTarget as HTMLImageElement).style.display = 'none'
+                }}
+              />
+            )}
+            <p className="text-sm text-gray-500">
+              {service.supplier_name}
+              {service.category_secondary && ` · ${service.category_secondary}`}
+            </p>
+          </div>
 
           {/* Info grid */}
           <div className="grid grid-cols-2 gap-3 mb-6">

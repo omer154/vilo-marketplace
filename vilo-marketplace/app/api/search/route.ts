@@ -58,13 +58,19 @@ export async function POST(req: Request) {
     //   ALL query words, fetch their active services, prepend to results.
     let supplierMatches: Array<Record<string, unknown>> = []
     if (hasTextQuery && queryWords.length > 0) {
-      let supQuery = supabase.from('suppliers').select('id, name').eq('is_active', true)
+      let supQuery = supabase
+        .from('suppliers')
+        .select('id, name, logo_url')
+        .eq('is_active', true)
       for (const w of queryWords) supQuery = supQuery.ilike('name', `%${w}%`)
       const { data: matchedSuppliers } = await supQuery.limit(10)
       const supplierIds = (matchedSuppliers || []).map((s) => s.id)
       if (supplierIds.length > 0) {
-        const supplierNameById = new Map(
-          (matchedSuppliers || []).map((s) => [s.id, s.name as string])
+        const supplierById = new Map(
+          (matchedSuppliers || []).map((s) => [
+            s.id,
+            { name: s.name as string, logo_url: (s.logo_url as string | null) ?? null },
+          ])
         )
         const { data: svcs } = await supabase
           .from('services')
@@ -74,10 +80,14 @@ export async function POST(req: Request) {
           .in('supplier_id', supplierIds)
           .eq('is_active', true)
           .limit(60)
-        supplierMatches = (svcs || []).map((s) => ({
-          ...s,
-          supplier_name: supplierNameById.get(s.supplier_id as string) || null,
-        }))
+        supplierMatches = (svcs || []).map((s) => {
+          const sup = supplierById.get(s.supplier_id as string)
+          return {
+            ...s,
+            supplier_name: sup?.name ?? null,
+            supplier_logo_url: sup?.logo_url ?? null,
+          }
+        })
       }
     }
 

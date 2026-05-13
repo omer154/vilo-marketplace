@@ -139,11 +139,26 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
 
         {/* Supplier */}
         <div className="flex items-center gap-2">
-          <div
-            className={`w-7 h-7 rounded-full ${avatarColor} flex items-center justify-center text-white text-xs font-bold shrink-0`}
-          >
-            {getInitials(supplierName)}
-          </div>
+          {service.supplier_logo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={service.supplier_logo_url}
+              alt={supplierName}
+              className="w-7 h-7 rounded-full object-cover bg-white border border-gray-100 shrink-0"
+              onError={(e) => {
+                // Hide broken images and let CSS show no fallback —
+                // the supplier name text right next to it still
+                // identifies the vendor.
+                ;(e.currentTarget as HTMLImageElement).style.display = 'none'
+              }}
+            />
+          ) : (
+            <div
+              className={`w-7 h-7 rounded-full ${avatarColor} flex items-center justify-center text-white text-xs font-bold shrink-0`}
+            >
+              {getInitials(supplierName)}
+            </div>
+          )}
           <span className="text-xs text-gray-500 truncate">
             {supplierName}
           </span>

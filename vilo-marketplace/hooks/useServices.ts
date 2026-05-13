@@ -61,6 +61,7 @@ export function useServices() {
             id: row.id,
             supplier_id: row.supplier_id,
             supplier_name: row.supplier_name,
+            supplier_logo_url: row.supplier_logo_url ?? null,
             service_name: row.service_name,
             category_primary: row.category_primary,
             category_secondary: row.category_secondary,

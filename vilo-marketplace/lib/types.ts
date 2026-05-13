@@ -26,6 +26,7 @@ export interface Service {
   id: string
   supplier_id: string
   supplier_name?: string
+  supplier_logo_url?: string | null
   service_name: string
   category_primary: CategorySlug
   category_secondary: string | null
