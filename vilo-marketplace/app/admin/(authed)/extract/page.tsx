@@ -32,9 +32,12 @@ type ResultState =
   | { kind: 'error'; message: string; stage: 'extraction' | 'push' }
 
 function avgConfidence(rows: CatalogRow[]): number | null {
-  const scored = rows
-    .map((r) => r._confidence_avg)
-    .filter((c): c is number => typeof c === 'number')
+  // _confidence_avg's type is the narrow ConfidenceScore (1..5), so the
+  // predicate must narrow to that, not to the wider `number`.
+  const scored: number[] = []
+  for (const r of rows) {
+    if (typeof r._confidence_avg === 'number') scored.push(r._confidence_avg)
+  }
   if (scored.length === 0) return null
   return scored.reduce((s, v) => s + v, 0) / scored.length
 }
