@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient, getCurrentUser } from '@/lib/supabase/server'
+import { checkSameOrigin } from '@/lib/csrf'
 
 export const runtime = 'nodejs'
 
@@ -7,6 +8,10 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const csrfErr = checkSameOrigin(request)
+  if (csrfErr) {
+    return NextResponse.json({ error: `csrf: ${csrfErr}` }, { status: 403 })
+  }
   const user = await getCurrentUser()
   if (!user) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })

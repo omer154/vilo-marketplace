@@ -4,6 +4,7 @@ import {
   createSupabaseServerClient,
   getCurrentUser,
 } from '@/lib/supabase/server'
+import { checkSameOrigin } from '@/lib/csrf'
 
 export const runtime = 'nodejs'
 
@@ -48,6 +49,10 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const csrfErr = checkSameOrigin(request)
+  if (csrfErr) {
+    return NextResponse.json({ error: `csrf: ${csrfErr}` }, { status: 403 })
+  }
   const admin_user = await requireAdminUser()
   if (!admin_user) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
@@ -142,6 +147,10 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const csrfErr = checkSameOrigin(request)
+  if (csrfErr) {
+    return NextResponse.json({ error: `csrf: ${csrfErr}` }, { status: 403 })
+  }
   const admin_user = await requireAdminUser()
   if (!admin_user) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
