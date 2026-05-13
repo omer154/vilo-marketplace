@@ -238,11 +238,40 @@ async function upsertOneRow(
   if (has('location_mode')) payload.location_mode = row.location_mode
   if (has('staging_row_id')) payload.staging_row_id = row._row_id
 
-  const { error } = await supabase.from('services').upsert(payload, {
-    onConflict: 'supplier_id,service_name,min_participants,max_participants',
-  })
+  // Manual upsert: PostgREST's ON CONFLICT can't match the expression-based
+  // unique index `services_tier_unique` (it uses COALESCE on min/max
+  // participants). SELECT first, then INSERT or UPDATE accordingly.
+  let lookup = supabase
+    .from('services')
+    .select('id')
+    .eq('supplier_id', supplierId)
+    .eq('service_name', row.service_name || '')
+  // .eq() on null doesn't match — use .is() for nulls.
+  lookup =
+    row.capacity_min == null
+      ? lookup.is('min_participants', null)
+      : lookup.eq('min_participants', row.capacity_min)
+  lookup =
+    row.capacity_max == null
+      ? lookup.is('max_participants', null)
+      : lookup.eq('max_participants', row.capacity_max)
 
-  if (error) return { error: `upsert failed: ${error.message}` }
+  const { data: existing, error: lookupErr } = await lookup
+    .limit(1)
+    .maybeSingle()
+  if (lookupErr) return { error: `lookup failed: ${lookupErr.message}` }
+
+  if (existing) {
+    const { error: updateErr } = await supabase
+      .from('services')
+      .update(payload)
+      .eq('id', existing.id)
+    if (updateErr) return { error: `update failed: ${updateErr.message}` }
+    return 'updated'
+  }
+
+  const { error: insertErr } = await supabase.from('services').insert(payload)
+  if (insertErr) return { error: `insert failed: ${insertErr.message}` }
   return 'inserted'
 }
 
@@ -390,7 +419,8 @@ export async function syncApprovedRows(): Promise<SyncStats> {
       recordFailure(upsertResult.error)
       continue
     }
-    stats.inserted++
+    if (upsertResult === 'updated') stats.updated++
+    else stats.inserted++
     syncedRowNumbers.push(row._sheet_row_number)
   }
 
