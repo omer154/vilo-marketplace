@@ -3,18 +3,19 @@
 import { useCallback, useRef } from 'react'
 import { Calculator } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
-import type { LocationType } from '@/lib/types'
+import type { LocationMode } from '@/lib/types'
 
-const LOCATION_OPTIONS: { value: LocationType; label: string }[] = [
-  { value: 'onsite', label: 'באתר הלקוח' },
+const LOCATION_OPTIONS: { value: LocationMode; label: string }[] = [
+  { value: 'at_client', label: 'מגיעים אליכם' },
+  { value: 'at_provider', label: 'אצל הספק' },
   { value: 'remote', label: 'מרחוק' },
-  { value: 'both', label: 'גמיש' },
+  { value: 'hybrid', label: 'גמיש' },
 ]
 
 export default function Sidebar() {
   const totalBudget = useMarketplaceStore((s) => s.totalBudget)
   const participantsCount = useMarketplaceStore((s) => s.participantsCount)
-  const locationTypes = useMarketplaceStore((s) => s.locationTypes)
+  const locationModes = useMarketplaceStore((s) => s.locationModes)
   const setFilter = useMarketplaceStore((s) => s.setFilter)
   const clearFilters = useMarketplaceStore((s) => s.clearFilters)
 
@@ -49,12 +50,12 @@ export default function Sidebar() {
     [setFilter]
   )
 
-  const toggleLocation = (loc: LocationType) => {
-    if (locationTypes.includes(loc)) {
-      const next = locationTypes.filter((l) => l !== loc)
-      if (next.length > 0) setFilter('locationTypes', next)
+  const toggleLocation = (loc: LocationMode) => {
+    if (locationModes.includes(loc)) {
+      const next = locationModes.filter((l) => l !== loc)
+      if (next.length > 0) setFilter('locationModes', next)
     } else {
-      setFilter('locationTypes', [...locationTypes, loc])
+      setFilter('locationModes', [...locationModes, loc])
     }
   }
 
@@ -123,7 +124,7 @@ export default function Sidebar() {
             >
               <input
                 type="checkbox"
-                checked={locationTypes.includes(opt.value)}
+                checked={locationModes.includes(opt.value)}
                 onChange={() => toggleLocation(opt.value)}
                 className="rounded border-gray-300 text-brand-500 focus:ring-brand-500"
               />

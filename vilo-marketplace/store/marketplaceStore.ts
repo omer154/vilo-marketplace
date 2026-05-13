@@ -1,5 +1,27 @@
 import { create } from 'zustand'
-import type { CategorySlug, LocationType, ChatMessage, Service } from '@/lib/types'
+import type {
+  CategorySlug,
+  LocationType,
+  LocationMode,
+  ChatMessage,
+  Service,
+} from '@/lib/types'
+
+const ALL_LOCATION_MODES: LocationMode[] = [
+  'at_client',
+  'at_provider',
+  'remote',
+  'hybrid',
+]
+
+/** Map a legacy LocationType (what the concierge intent extractor still
+ *  returns) onto the rich LocationMode set. */
+function legacyLocationToModes(loc: LocationType | null | undefined): LocationMode[] {
+  if (!loc) return ALL_LOCATION_MODES
+  if (loc === 'onsite') return ['at_client', 'hybrid']
+  if (loc === 'remote') return ['remote', 'hybrid']
+  return ALL_LOCATION_MODES
+}
 
 export interface ToastEntry {
   id: string
@@ -12,7 +34,7 @@ interface MarketplaceStore {
   activeCategories: CategorySlug[]
   totalBudget: number | null
   participantsCount: number | null
-  locationTypes: LocationType[]
+  locationModes: LocationMode[]
   searchQuery: string
   aiSearchLabel: string | null
   setFilter: <K extends keyof FilterKeys>(key: K, value: FilterKeys[K]) => void
@@ -51,7 +73,7 @@ interface FilterKeys {
   activeCategories: CategorySlug[]
   totalBudget: number | null
   participantsCount: number | null
-  locationTypes: LocationType[]
+  locationModes: LocationMode[]
   searchQuery: string
   aiSearchLabel: string | null
 }
@@ -69,7 +91,7 @@ const initialFilters: FilterKeys = {
   activeCategories: [],
   totalBudget: null,
   participantsCount: null,
-  locationTypes: ['onsite', 'remote', 'both'],
+  locationModes: ALL_LOCATION_MODES,
   searchQuery: '',
   aiSearchLabel: null,
 }
@@ -115,9 +137,7 @@ export const useMarketplaceStore = create<MarketplaceStore>((set) => ({
       activeCategories: filters.categories || [],
       totalBudget: filters.total_budget ?? null,
       participantsCount: filters.participants ?? null,
-      locationTypes: filters.location
-        ? [filters.location]
-        : ['onsite', 'remote', 'both'],
+      locationModes: legacyLocationToModes(filters.location ?? null),
       searchQuery: filters.query || '',
       aiSearchLabel: filters.explanation || null,
     }),

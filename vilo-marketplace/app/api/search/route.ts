@@ -10,6 +10,7 @@ export async function POST(req: Request) {
       total_budget = null,
       participants = null,
       location = null,
+      location_modes = null,
     } = await req.json()
 
     const supabase = createClient(
@@ -40,6 +41,9 @@ export async function POST(req: Request) {
       p_participants:      participants || null,
       p_location:          location || null,
       p_limit:             60,
+      p_location_modes:    Array.isArray(location_modes) && location_modes.length > 0
+        ? location_modes
+        : null,
     })
 
     if (strictError) {

@@ -14,7 +14,7 @@ export function useServices() {
   const activeCategories = useMarketplaceStore((s) => s.activeCategories)
   const totalBudget = useMarketplaceStore((s) => s.totalBudget)
   const participantsCount = useMarketplaceStore((s) => s.participantsCount)
-  const locationTypes = useMarketplaceStore((s) => s.locationTypes)
+  const locationModes = useMarketplaceStore((s) => s.locationModes)
   const searchQuery = useMarketplaceStore((s) => s.searchQuery)
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -29,12 +29,12 @@ export function useServices() {
       setStrictCount(0)
 
       try {
-        const locationFilter =
-          locationTypes.length === 3 || locationTypes.length === 0
+        // Send the full location_mode array. If the user has all four
+        // modes selected, pass null so the RPC doesn't bother filtering.
+        const sendModes =
+          locationModes.length === 0 || locationModes.length === 4
             ? null
-            : locationTypes.length === 1
-              ? locationTypes[0]
-              : null
+            : locationModes
 
         const res = await fetch('/api/search', {
           method: 'POST',
@@ -45,7 +45,7 @@ export function useServices() {
               activeCategories.length > 0 ? activeCategories : null,
             total_budget: totalBudget || null,
             participants: participantsCount || null,
-            location: locationFilter,
+            location_modes: sendModes,
           }),
         })
 
@@ -89,7 +89,7 @@ export function useServices() {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current)
     }
-  }, [activeCategories, totalBudget, participantsCount, locationTypes, searchQuery])
+  }, [activeCategories, totalBudget, participantsCount, locationModes, searchQuery])
 
   return { services, isLoading, error, total: services.length, relaxed, strictCount }
 }
