@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
-import { Search, ExternalLink } from 'lucide-react'
+import { Search, ExternalLink, Pencil } from 'lucide-react'
 import ActiveToggle from '../ActiveToggle'
 
 interface PageProps {
@@ -126,9 +126,14 @@ export default async function SuppliersListPage({ searchParams }: PageProps) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
-                        <h2 className="font-medium text-gray-900 truncate">
-                          {s.name}
-                        </h2>
+                        <Link
+                          href={`/admin/suppliers/${s.id}`}
+                          className="hover:text-gray-700"
+                        >
+                          <h2 className="font-medium text-gray-900 truncate hover:underline">
+                            {s.name}
+                          </h2>
+                        </Link>
                         {s.name_en && (
                           <p className="text-xs text-gray-500" dir="ltr">
                             {s.name_en}
@@ -170,6 +175,13 @@ export default async function SuppliersListPage({ searchParams }: PageProps) {
                           {s.contact_email}
                         </a>
                       )}
+                      <Link
+                        href={`/admin/suppliers/${s.id}`}
+                        className="inline-flex items-center gap-1 text-gray-600 hover:text-gray-900 ml-auto"
+                      >
+                        <Pencil className="w-3 h-3" />
+                        ערוך
+                      </Link>
                     </div>
                   </div>
                 </div>

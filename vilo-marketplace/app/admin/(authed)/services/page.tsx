@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
-import { Search, ChevronRight, ChevronLeft } from 'lucide-react'
+import { Search, ChevronRight, ChevronLeft, Pencil } from 'lucide-react'
 import ActiveToggle from '../ActiveToggle'
 
 const PAGE_SIZE = 50
@@ -187,13 +187,14 @@ export default async function ServicesListPage({ searchParams }: PageProps) {
                 <th className="px-3 py-2 text-right font-medium text-gray-700">משתתפים</th>
                 <th className="px-3 py-2 text-right font-medium text-gray-700">מיקום</th>
                 <th className="px-3 py-2 text-right font-medium text-gray-700">פעיל?</th>
+                <th className="px-3 py-2 text-right font-medium text-gray-700"></th>
               </tr>
             </thead>
             <tbody>
               {services.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={8}
                     className="px-3 py-12 text-center text-gray-400"
                   >
                     אין שירותים שתואמים את הסינון.
@@ -206,14 +207,19 @@ export default async function ServicesListPage({ searchParams }: PageProps) {
                     className={`border-b border-gray-100 last:border-0 hover:bg-gray-50 ${!s.is_active ? 'opacity-50' : ''}`}
                   >
                     <td className="px-3 py-2 text-gray-900 max-w-md">
-                      <div className="font-medium truncate" title={s.service_name}>
-                        {s.service_name || '—'}
-                      </div>
-                      {s.category_secondary && (
-                        <div className="text-xs text-gray-500 truncate">
-                          {s.category_secondary}
+                      <Link
+                        href={`/admin/services/${s.id}`}
+                        className="block hover:text-gray-700"
+                      >
+                        <div className="font-medium truncate" title={s.service_name}>
+                          {s.service_name || '—'}
                         </div>
-                      )}
+                        {s.category_secondary && (
+                          <div className="text-xs text-gray-500 truncate">
+                            {s.category_secondary}
+                          </div>
+                        )}
+                      </Link>
                     </td>
                     <td className="px-3 py-2 text-gray-700">
                       {s.suppliers?.name || '—'}
@@ -247,6 +253,15 @@ export default async function ServicesListPage({ searchParams }: PageProps) {
                         id={s.id}
                         initialActive={s.is_active}
                       />
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <Link
+                        href={`/admin/services/${s.id}`}
+                        className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 px-2 py-1 rounded hover:bg-gray-100"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                        ערוך
+                      </Link>
                     </td>
                   </tr>
                 ))
