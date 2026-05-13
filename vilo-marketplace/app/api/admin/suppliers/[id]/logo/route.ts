@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { isCurrentUserAdmin } from '@/lib/supabase/server'
+import {
+  createSupabaseServerClient,
+  getCurrentUser,
+} from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
 
@@ -28,11 +31,25 @@ function extFromMime(mime: string): string {
   }
 }
 
+async function requireAdminUser(): Promise<{ id: string } | null> {
+  const user = await getCurrentUser()
+  if (!user) return null
+  const supabase = await createSupabaseServerClient()
+  const { data, error } = await supabase
+    .from('admins')
+    .select('user_id')
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (error || !data) return null
+  return { id: user.id }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await isCurrentUserAdmin())) {
+  const admin_user = await requireAdminUser()
+  if (!admin_user) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
   const { id: supplierId } = await params
@@ -112,7 +129,7 @@ export async function POST(
 
   const { error: updateErr } = await admin
     .from('suppliers')
-    .update({ logo_url: logoUrl })
+    .update({ logo_url: logoUrl, updated_by: admin_user.id })
     .eq('id', supplierId)
   if (updateErr) {
     return NextResponse.json({ error: updateErr.message }, { status: 500 })
@@ -125,7 +142,8 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await isCurrentUserAdmin())) {
+  const admin_user = await requireAdminUser()
+  if (!admin_user) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
   const { id: supplierId } = await params
@@ -145,7 +163,7 @@ export async function DELETE(
 
   const { error: updateErr } = await admin
     .from('suppliers')
-    .update({ logo_url: null })
+    .update({ logo_url: null, updated_by: admin_user.id })
     .eq('id', supplierId)
   if (updateErr) {
     return NextResponse.json({ error: updateErr.message }, { status: 500 })

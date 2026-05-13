@@ -1,7 +1,7 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Clock, Users as UsersIcon, Coins, CheckCircle, MapPin } from 'lucide-react'
+import { Clock, Users as UsersIcon, Coins, CheckCircle } from 'lucide-react'
 import {
   Heart,
   Users,

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { isCurrentUserAdmin, createSupabaseServerClient } from '@/lib/supabase/server'
+import { createSupabaseServerClient, getCurrentUser } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
 
@@ -11,9 +11,20 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!(await isCurrentUserAdmin())) {
+  const user = await getCurrentUser()
+  if (!user) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
+  const supabase = await createSupabaseServerClient()
+  const { data: adminRow, error: adminErr } = await supabase
+    .from('admins')
+    .select('user_id')
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (adminErr || !adminRow) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  }
+
   const { id } = await params
   const body = await request.json().catch(() => null)
   if (!body || typeof body !== 'object') {
@@ -42,7 +53,10 @@ export async function PATCH(
     return NextResponse.json({ error: 'no allowed fields in body' }, { status: 400 })
   }
 
-  const supabase = await createSupabaseServerClient()
+  // Stamp the editor. updated_at + version bump happen via the
+  // services_audit trigger (migration 002).
+  update.updated_by = user.id
+
   const { error } = await supabase.from('services').update(update).eq('id', id)
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
