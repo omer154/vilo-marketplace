@@ -172,13 +172,15 @@ export default function ConciergePanel() {
             onClick={closeConcierge}
           />
 
-          {/* Panel */}
+          {/* Panel — percentage-based animation so the slide-in distance
+              matches the actual width on mobile (<460px) instead of
+              overshooting by sliding 460px on a 375px viewport. */}
           <motion.div
-            initial={{ x: 460 }}
+            initial={{ x: '100%' }}
             animate={{ x: 0 }}
-            exit={{ x: 460 }}
+            exit={{ x: '100%' }}
             transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-            className="fixed top-0 right-0 h-full w-[460px] max-w-full z-50 bg-white shadow-2xl flex flex-col"
+            className="fixed top-0 right-0 h-full w-full sm:w-[460px] z-50 bg-white shadow-2xl flex flex-col"
           >
             {/* Header */}
             <div className="bg-brand-900 text-white p-4 flex items-center justify-between shrink-0">

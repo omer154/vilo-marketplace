@@ -1,7 +1,7 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Clock, Users as UsersIcon, Coins, CheckCircle } from 'lucide-react'
+import { Clock, Users as UsersIcon, Coins, CheckCircle, MapPin } from 'lucide-react'
 import {
   Heart,
   Users,
@@ -65,6 +65,17 @@ const PRICING_UNIT_HE: Record<PricingUnit, string> = {
   project: 'לפרויקט',
   month: 'לחודש',
   unit: 'ליחידה',
+}
+
+const LOCATION_HE: Record<string, string> = {
+  // Newer location_mode values (preferred).
+  at_client: 'מגיעים אליכם',
+  at_provider: 'אצל הספק',
+  remote: 'מרחוק',
+  hybrid: 'גמיש',
+  // Legacy location_type fallbacks for un-migrated rows.
+  onsite: 'מגיעים אליכם',
+  both: 'גמיש',
 }
 
 function getInitials(name: string): string {
@@ -217,6 +228,17 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
               </span>
             )}
           </div>
+
+          {/* Location row — prefer the richer location_mode, fall back
+              to the legacy location_type for un-migrated rows. */}
+          {(service.location_mode || service.location_type) && (
+            <div className="flex items-center gap-1 text-xs text-gray-500">
+              <MapPin className="w-3.5 h-3.5 text-gray-400" />
+              {LOCATION_HE[service.location_mode || ''] ||
+                LOCATION_HE[service.location_type] ||
+                service.location_type}
+            </div>
+          )}
         </div>
 
         {/* Hover CTA */}
