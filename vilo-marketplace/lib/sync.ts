@@ -241,6 +241,13 @@ async function upsertOneRow(
   // Manual upsert: PostgREST's ON CONFLICT can't match the expression-based
   // unique index `services_tier_unique` (it uses COALESCE on min/max
   // participants). SELECT first, then INSERT or UPDATE accordingly.
+  //
+  // category_secondary in the lookup keeps services with identical name
+  // + price + capacity but from different PDF sections (e.g.
+  // "יעוץ פרטני להורים — מפגש בודד בקליניקה" appears in both the
+  // young-kids and teens sections of Ruth Ganel's catalog) as separate
+  // rows instead of collapsing them. Same fix as the extractor's
+  // mergeAndValidate.
   let lookup = supabase
     .from('services')
     .select('id')
@@ -255,6 +262,10 @@ async function upsertOneRow(
     row.capacity_max == null
       ? lookup.is('max_participants', null)
       : lookup.eq('max_participants', row.capacity_max)
+  lookup =
+    row.supplier_category == null || row.supplier_category === ''
+      ? lookup.is('category_secondary', null)
+      : lookup.eq('category_secondary', row.supplier_category)
 
   const { data: existing, error: lookupErr } = await lookup
     .limit(1)
