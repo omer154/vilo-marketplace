@@ -115,7 +115,10 @@ export default function ExtractPage() {
   const [files, setFiles] = useState<File[]>([])
   const [text, setText] = useState('')
   const [urls, setUrls] = useState('')
-  const [phase, setPhase] = useState<'idle' | 'extracting' | 'review' | 'importing' | 'done' | 'error'>('idle')
+  const [batchSupplier, setBatchSupplier] = useState('')
+  const [phase, setPhase] = useState<
+    'idle' | 'extracting' | 'consolidating' | 'review' | 'importing' | 'done' | 'error'
+  >('idle')
   const [errorMsg, setErrorMsg] = useState('')
   const [sources, setSources] = useState<SourceStatus[]>([])
   const [rows, setRows] = useState<EditableRow[]>([])
@@ -143,9 +146,14 @@ export default function ExtractPage() {
     setSources([])
     setRows([])
 
-    // One request per source keeps every call small & fast. A single batch of
-    // several heavy PDFs can exceed Vercel's per-request memory/time budget
-    // (which surfaced as a bare 500). Sequential here = isolated + live progress.
+    const hasFiles = files.length > 0
+    const hasUrls = urls.trim() !== ''
+    const hasText = text.trim() !== ''
+    const supplier = batchSupplier.trim()
+
+    // Heavy sources are extracted one request each (stable, no whole-batch 500).
+    // The pasted text is the "info/pricing layer" — when there are files/urls it
+    // is NOT extracted on its own; it's folded into the services in the merge step.
     const jobs: { label: string; build: () => FormData }[] = []
     files.forEach((f) =>
       jobs.push({
@@ -157,17 +165,18 @@ export default function ExtractPage() {
         },
       })
     )
-    if (urls.trim()) {
+    if (hasUrls) {
       jobs.push({
         label: 'אתרים',
         build: () => {
           const fd = new FormData()
           fd.append('urls', urls.trim())
-          if (text.trim()) fd.append('text', text.trim())
           return fd
         },
       })
-    } else if (text.trim()) {
+    }
+    const textOnly = !hasFiles && !hasUrls && hasText
+    if (textOnly) {
       jobs.push({
         label: 'טקסט שהודבק',
         build: () => {
@@ -187,10 +196,10 @@ export default function ExtractPage() {
         if (!res.ok) {
           stat.push({ label: job.label, status: 'error', rows: 0, error: json.error || `שגיאה ${res.status}` })
         } else {
-          const rows: CatalogRow[] = Array.isArray(json.rows) ? json.rows : []
-          acc.push(...rows)
+          const r: CatalogRow[] = Array.isArray(json.rows) ? json.rows : []
+          acc.push(...r)
           if (Array.isArray(json.sources) && json.sources.length) stat.push(...json.sources)
-          else stat.push({ label: job.label, status: 'done', rows: rows.length, error: null })
+          else stat.push({ label: job.label, status: 'done', rows: r.length, error: null })
         }
       } catch (e) {
         stat.push({ label: job.label, status: 'error', rows: 0, error: e instanceof Error ? e.message : 'שגיאת רשת' })
@@ -198,8 +207,32 @@ export default function ExtractPage() {
       setSources([...stat])
     }
 
-    setRows(acc.map((r) => ({ ...r, _key: _keyCounter++ })))
-    if (acc.length === 0) {
+    // Merge + sync: unify the supplier and fold the pasted price text into the
+    // matching services (tiers, bar service, VAT notes…) in one pass.
+    let finalRows = acc
+    const infoText = !textOnly && hasText ? text.trim() : ''
+    const doneCount = stat.filter((s) => s.status === 'done').length
+    const needConsolidate = acc.length > 0 && (supplier !== '' || infoText !== '' || doneCount > 1)
+    if (needConsolidate) {
+      setPhase('consolidating')
+      try {
+        const res = await fetch('/api/admin/consolidate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: acc, supplierName: supplier || null, freeText: infoText || null }),
+        })
+        const json = await res.json().catch(() => ({}))
+        if (res.ok && Array.isArray(json.rows) && json.rows.length > 0) finalRows = json.rows
+      } catch {
+        // keep the un-merged rows on failure — never lose data
+      }
+    }
+
+    // Deterministic guarantee: an explicit supplier name always wins.
+    if (supplier) finalRows = finalRows.map((r) => ({ ...r, supplier_name: supplier }))
+
+    setRows(finalRows.map((r) => ({ ...r, _key: _keyCounter++ })))
+    if (finalRows.length === 0) {
       setErrorMsg(
         stat.some((s) => s.status === 'error')
           ? 'החילוץ נכשל עבור המקורות. בדקו את הפירוט למטה ונסו שוב.'
@@ -265,6 +298,7 @@ export default function ExtractPage() {
     setFiles([])
     setText('')
     setUrls('')
+    setBatchSupplier('')
     setRows([])
     setSources([])
     setStats(null)
@@ -288,6 +322,23 @@ export default function ExtractPage() {
       {/* ───────── INPUT (idle / extracting) ───────── */}
       {(phase === 'idle' || phase === 'extracting' || phase === 'error') && (
         <>
+          <div className="rounded-xl border border-gray-200 bg-white p-4">
+            <label className="mb-1 block text-sm font-medium text-gray-800">
+              שם הספק <span className="font-normal text-gray-400">(אופציונלי, מומלץ כשהכול ספק אחד)</span>
+            </label>
+            <input
+              type="text"
+              value={batchSupplier}
+              onChange={(e) => setBatchSupplier(e.target.value)}
+              placeholder="אם כל הקבצים והטקסט שייכים לספק אחד — כתבו את שמו כאן, וכל השורות יאוחדו תחתיו"
+              disabled={phase === 'extracting'}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-transparent focus:ring-2 focus:ring-gray-900 disabled:bg-gray-50"
+            />
+            <p className="mt-1.5 text-xs text-gray-500">
+              כל השירותים יאוחדו תחת הספק הזה, וכל מחיר/מידע מהטקסט שתדביקו יסונכרן אל השירותים הנכונים.
+            </p>
+          </div>
+
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             {/* Files (multi + drag/drop + images) */}
             <div
@@ -455,6 +506,42 @@ export default function ExtractPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* ───────── MERGE / SYNC ───────── */}
+      {phase === 'consolidating' && (
+        <div className="space-y-3">
+          {sources.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {sources.map((s, i) => (
+                <span
+                  key={i}
+                  title={s.error || ''}
+                  className={`inline-flex max-w-xs items-center gap-1.5 truncate rounded-full px-3 py-1 text-xs ${
+                    s.status === 'done' ? 'bg-gray-100 text-gray-700' : 'bg-red-50 text-red-700'
+                  }`}
+                >
+                  {s.status === 'done' ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                  ) : (
+                    <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                  )}
+                  <span className="truncate">{s.label}</span>
+                  <span className="text-gray-400">· {s.status === 'done' ? `${s.rows} שורות` : 'נכשל'}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex items-center gap-3 rounded-xl border border-violet-200 bg-violet-50 p-4">
+            <Loader2 className="h-5 w-5 animate-spin text-violet-600" />
+            <div>
+              <p className="font-medium text-violet-900">מאחד ומסנכרן נתונים…</p>
+              <p className="mt-1 text-xs text-violet-600">
+                מאחד את הספק ומשייך מחירים ומידע מהטקסט אל השירותים הנכונים.
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ───────── REVIEW ───────── */}
