@@ -177,7 +177,9 @@ export default function InlineField({
       title="לחץ לעריכה"
       className="group/edit -mx-1 inline-flex max-w-full items-center gap-1 rounded px-1 text-right align-middle transition-colors hover:bg-brand-50"
     >
-      <span className={isEmpty ? 'italic text-gray-400' : className}>
+      <span
+        className={`${isEmpty ? 'italic text-gray-400' : className} border-b border-dashed border-brand-300/70 group-hover/edit:border-brand-500`}
+      >
         {!isEmpty && prefix}
         {isEmpty ? emptyLabel ?? 'הוסף' : readText}
         {!isEmpty && suffix}

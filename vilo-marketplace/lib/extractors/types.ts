@@ -84,9 +84,12 @@ export const CATALOG_COLUMNS: (keyof CatalogRow)[] = [
   'supplier_notes',
 ]
 
+/** Image MIME types Claude vision accepts. */
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
 export interface ExtractedSource {
-  /** "excel", "pdf", "docx", "url", "text" — what fed the extractor */
-  source_type: 'excel' | 'pdf' | 'docx' | 'url' | 'text'
+  /** "excel", "pdf", "docx", "doc", "url", "text", "image" — what fed the extractor */
+  source_type: 'excel' | 'pdf' | 'docx' | 'doc' | 'url' | 'text' | 'image'
   /** Filename, URL, or "pasted text" — what to show to the user */
   source_label: string
   /** If the source already has tabular rows (Excel/CSV), pass them through */
@@ -96,4 +99,14 @@ export interface ExtractedSource {
   /** Raw PDF buffer — sent directly to Claude as a document content block.
    *  Avoids a separate parsing step; Claude handles vision + text natively. */
   pdf_buffer?: Buffer
+  /** Image bytes for a photo/scan of a price list/flyer. Claude reads the
+   *  Hebrew text in the picture natively (vision) — no OCR step needed. */
+  image_buffer?: Buffer
+  image_media_type?: ImageMediaType
+  /** Supplier-name hint derived from the filename, used to fill supplier_name
+   *  when the model leaves it null (one file is usually one supplier). */
+  supplier_hint?: string
+  /** Extra context the admin pasted alongside a website/file (e.g. prices not
+   *  on the page) — folded into the extraction to fill otherwise-missing fields. */
+  supplementary_text?: string
 }

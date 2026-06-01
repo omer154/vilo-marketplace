@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 import {
@@ -16,6 +16,7 @@ import {
   EyeOff,
   Loader2,
   Sparkles,
+  Camera,
 } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import AdminProbe from '@/components/layout/AdminProbe'
@@ -35,6 +36,72 @@ import {
   locationLabel,
   completeness,
 } from '@/lib/ui-meta'
+
+/** Avatar that, for admins, doubles as a click-to-upload logo editor. */
+function LogoBlock({
+  supplier,
+  isAdmin,
+  avatarColor,
+}: {
+  supplier: Supplier
+  isAdmin: boolean
+  avatarColor: string
+}) {
+  const pushToast = useMarketplaceStore((s) => s.pushToast)
+  const [logo, setLogo] = useState<string | null>(supplier.logo_url)
+  const [uploading, setUploading] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  async function upload(file: File) {
+    setUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(`/api/admin/suppliers/${supplier.id}/logo`, { method: 'POST', body: fd })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || 'העלאה נכשלה')
+      setLogo(json.logo_url)
+      pushToast('הלוגו עודכן', 'success')
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : 'העלאה נכשלה', 'error')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const inner = logo ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={logo} alt={supplier.name} className="h-20 w-20 rounded-2xl border border-gray-100 bg-white object-cover shadow-card" />
+  ) : (
+    <div className={`flex h-20 w-20 items-center justify-center rounded-2xl ${avatarColor} text-2xl font-bold text-white shadow-card`}>
+      {getInitials(supplier.name)}
+    </div>
+  )
+
+  if (!isAdmin) return <div className="shrink-0">{inner}</div>
+
+  return (
+    <div className="relative shrink-0">
+      <button type="button" onClick={() => inputRef.current?.click()} title="החלף לוגו" className="group relative block rounded-2xl">
+        {inner}
+        <span className="absolute inset-0 flex items-center justify-center rounded-2xl text-white opacity-0 transition group-hover:bg-black/40 group-hover:opacity-100">
+          {uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Camera className="h-5 w-5" />}
+        </span>
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) upload(f)
+          if (inputRef.current) inputRef.current.value = ''
+        }}
+      />
+    </div>
+  )
+}
 
 function SupplierVisibilityToggle({ supplier }: { supplier: Supplier }) {
   const pushToast = useMarketplaceStore((s) => s.pushToast)
@@ -249,15 +316,8 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
           )}
 
           <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
-            {/* Logo / avatar */}
-            {supplier.logo_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={supplier.logo_url} alt={supplier.name} className="h-20 w-20 shrink-0 rounded-2xl border border-gray-100 bg-white object-cover shadow-card" />
-            ) : (
-              <div className={`flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl ${avatarColor} text-2xl font-bold text-white shadow-card`}>
-                {getInitials(supplier.name)}
-              </div>
-            )}
+            {/* Logo / avatar — click to upload when admin */}
+            <LogoBlock supplier={supplier} isAdmin={isAdmin} avatarColor={avatarColor} />
 
             <div className="flex-1">
               <div className="flex flex-wrap items-center gap-3">
@@ -266,6 +326,18 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
                 </h1>
                 {isAdmin && <SupplierVisibilityToggle supplier={supplier} />}
               </div>
+
+              {(supplier.name_en || isAdmin) && (
+                <p className="mt-0.5 text-sm text-gray-400" dir="ltr">
+                  <InlineField
+                    endpoint={supEp}
+                    field="name_en"
+                    value={supplier.name_en ?? null}
+                    emptyLabel={isAdmin ? 'Add English name' : undefined}
+                    className="text-sm text-gray-400"
+                  />
+                </p>
+              )}
 
               <p className="mt-2 max-w-2xl text-gray-600">
                 <InlineField endpoint={supEp} field="description_short" value={supplier.description_short} type="textarea" emptyLabel={isAdmin ? 'הוסף תיאור לספק' : undefined} className="text-gray-600" />

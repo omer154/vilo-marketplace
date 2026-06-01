@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useRef, FormEvent } from 'react'
+import { useCallback, useRef, useState } from 'react'
+import Link from 'next/link'
 import {
   Upload,
   Link2,
@@ -8,405 +9,609 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
-  ExternalLink,
+  X,
+  Trash2,
+  Sparkles,
+  Image as ImageIcon,
+  ArrowLeft,
+  Database,
 } from 'lucide-react'
 import type { CatalogRow } from '@/lib/extractors/types'
 
-type ResultState =
-  | { kind: 'idle' }
-  | { kind: 'extracting'; label: string }
-  | { kind: 'pushing'; label: string; rows_count: number }
-  | {
-      kind: 'success'
-      rows_count: number
-      source_label: string
-      sheet_url: string
-      avg_confidence: number | null
-    }
-  | {
-      kind: 'extracted_no_sheets'
-      rows: CatalogRow[]
-      source_label: string
-      setup_required: string[]
-    }
-  | { kind: 'error'; message: string; stage: 'extraction' | 'push' }
+// ── Editable-cell config (DB enums, Hebrew labels) ───────────────────
+const PRICING_UNITS = [
+  { value: 'person', label: 'לאדם' },
+  { value: 'group', label: 'לקבוצה' },
+  { value: 'hour', label: 'לשעה' },
+  { value: 'project', label: 'לפרויקט' },
+  { value: 'month', label: 'לחודש' },
+  { value: 'unit', label: 'ליחידה' },
+]
+const PRICE_TYPES = [
+  { value: 'fixed', label: 'מחיר קבוע' },
+  { value: 'on_request', label: 'לפי פנייה' },
+  { value: 'range', label: 'טווח' },
+]
+const LOCATION_MODES = [
+  { value: 'at_client', label: 'אצל הלקוח' },
+  { value: 'at_provider', label: 'אצל הספק' },
+  { value: 'remote', label: 'מקוון' },
+  { value: 'hybrid', label: 'גמיש' },
+]
 
-function avgConfidence(rows: CatalogRow[]): number | null {
-  // _confidence_avg's type is the narrow ConfidenceScore (1..5), so the
-  // predicate must narrow to that, not to the wider `number`.
-  const scored: number[] = []
-  for (const r of rows) {
-    if (typeof r._confidence_avg === 'number') scored.push(r._confidence_avg)
+type ColType = 'text' | 'number' | 'select' | 'textarea'
+interface ColDef {
+  key: keyof CatalogRow
+  label: string
+  type: ColType
+  options?: { value: string; label: string }[]
+  width: string
+}
+const COLS: ColDef[] = [
+  { key: 'supplier_name', label: 'ספק', type: 'text', width: 'min-w-[150px]' },
+  { key: 'service_name', label: 'שם השירות', type: 'text', width: 'min-w-[170px]' },
+  { key: 'supplier_category', label: 'קטגוריה', type: 'text', width: 'min-w-[120px]' },
+  { key: 'price_ils', label: 'מחיר ₪', type: 'number', width: 'min-w-[90px]' },
+  { key: 'pricing_unit', label: 'יחידה', type: 'select', options: PRICING_UNITS, width: 'min-w-[110px]' },
+  { key: 'price_type', label: 'סוג מחיר', type: 'select', options: PRICE_TYPES, width: 'min-w-[110px]' },
+  { key: 'capacity_min', label: 'מ־', type: 'number', width: 'min-w-[64px]' },
+  { key: 'capacity_max', label: 'עד', type: 'number', width: 'min-w-[64px]' },
+  { key: 'duration_hours', label: 'שעות', type: 'number', width: 'min-w-[64px]' },
+  { key: 'location_mode', label: 'מיקום', type: 'select', options: LOCATION_MODES, width: 'min-w-[110px]' },
+  { key: 'service_description', label: 'תיאור', type: 'textarea', width: 'min-w-[220px]' },
+  { key: 'supplier_notes', label: 'הערות', type: 'textarea', width: 'min-w-[170px]' },
+]
+
+interface SourceStatus {
+  label: string
+  status: 'done' | 'error'
+  rows: number
+  error: string | null
+}
+interface ImportStats {
+  read: number
+  inserted: number
+  updated: number
+  failed: number
+  suppliers_created: number
+  failures: Array<{ service_name: string | null; reason: string }>
+}
+
+type EditableRow = CatalogRow & { _key: number }
+let _keyCounter = 1
+
+function blankRow(): EditableRow {
+  return {
+    _key: _keyCounter++,
+    supplier_id: null,
+    supplier_name: '',
+    supplier_name_en: null,
+    supplier_category: null,
+    supplier_website: null,
+    service_id: null,
+    service_name: '',
+    service_description: null,
+    price_ils: null,
+    price_type: null,
+    price_min: null,
+    price_max: null,
+    pricing_unit: null,
+    capacity_min: null,
+    capacity_max: null,
+    duration_hours: null,
+    location_mode: null,
+    tags: null,
+    supplier_notes: null,
   }
-  if (scored.length === 0) return null
-  return scored.reduce((s, v) => s + v, 0) / scored.length
+}
+
+const ACCEPT = '.xlsx,.xls,.pdf,.docx,.doc,.txt,.csv,.png,.jpg,.jpeg,.webp,.gif'
+
+function isImageName(name: string) {
+  return /\.(png|jpe?g|webp|gif)$/i.test(name)
 }
 
 export default function ExtractPage() {
-  const [state, setState] = useState<ResultState>({ kind: 'idle' })
-  const [url, setUrl] = useState('')
-  const [pastedText, setPastedText] = useState('')
+  const [files, setFiles] = useState<File[]>([])
+  const [text, setText] = useState('')
+  const [urls, setUrls] = useState('')
+  const [phase, setPhase] = useState<'idle' | 'extracting' | 'review' | 'importing' | 'done' | 'error'>('idle')
+  const [errorMsg, setErrorMsg] = useState('')
+  const [sources, setSources] = useState<SourceStatus[]>([])
+  const [rows, setRows] = useState<EditableRow[]>([])
+  const [stats, setStats] = useState<ImportStats | null>(null)
+  const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const pushToSheet = async (
-    rows: CatalogRow[],
-    sourceLabel: string
-  ): Promise<ResultState> => {
-    setState({ kind: 'pushing', label: sourceLabel, rows_count: rows.length })
-    try {
-      const res = await fetch('/api/admin/sheets/push', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows, source_label: sourceLabel }),
-      })
-      const json = await res.json()
+  const addFiles = useCallback((list: FileList | null) => {
+    if (!list) return
+    const incoming = Array.from(list)
+    setFiles((prev) => {
+      const seen = new Set(prev.map((f) => f.name + f.size))
+      return [...prev, ...incoming.filter((f) => !seen.has(f.name + f.size))]
+    })
+  }, [])
 
-      if (res.status === 503 && json.error === 'sheets_not_configured') {
-        return {
-          kind: 'extracted_no_sheets',
-          rows,
-          source_label: sourceLabel,
-          setup_required: json.required_env || [],
-        }
-      }
-      if (!res.ok) {
-        return {
-          kind: 'error',
-          stage: 'push',
-          message: json.error || `push failed (${res.status})`,
-        }
-      }
-      return {
-        kind: 'success',
-        rows_count: rows.length,
-        source_label: sourceLabel,
-        sheet_url: json.url,
-        avg_confidence: avgConfidence(rows),
-      }
-    } catch (err) {
-      return {
-        kind: 'error',
-        stage: 'push',
-        message: err instanceof Error ? err.message : 'unknown error',
-      }
-    }
-  }
+  const removeFile = (i: number) => setFiles((prev) => prev.filter((_, idx) => idx !== i))
 
-  const handleExtractResponse = async (
-    res: Response,
-    label: string
-  ): Promise<void> => {
-    let json: { rows?: CatalogRow[]; error?: string } = {}
-    try {
-      json = await res.json()
-    } catch {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: `שגיאת רשת (סטטוס ${res.status})`,
-      })
-      return
-    }
-    if (!res.ok) {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: json.error || `extraction failed (${res.status})`,
-      })
-      return
-    }
-    if (!Array.isArray(json.rows)) {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: 'התשובה מהשרת לא הכילה שורות. נסה שוב או בדוק את הקובץ.',
-      })
-      return
-    }
-    if (json.rows.length === 0) {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: 'לא נמצאו שירותים במקור הזה. נסה קובץ אחר.',
-      })
-      return
-    }
-    setState(await pushToSheet(json.rows, label))
-  }
+  const hasInput = files.length > 0 || text.trim() !== '' || urls.trim() !== ''
 
-  const submitFile = async (file: File) => {
-    setState({ kind: 'extracting', label: file.name })
+  async function runExtract() {
+    if (!hasInput) return
+    setPhase('extracting')
+    setErrorMsg('')
+    setSources([])
     const form = new FormData()
-    form.append('file', file)
+    files.forEach((f) => form.append('files', f))
+    if (text.trim()) form.append('text', text.trim())
+    if (urls.trim()) form.append('urls', urls.trim())
     try {
       const res = await fetch('/api/admin/extract', { method: 'POST', body: form })
-      await handleExtractResponse(res, file.name)
-    } catch (err) {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: err instanceof Error ? err.message : 'unknown error',
-      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setErrorMsg(json.error || `שגיאה ${res.status}`)
+        setPhase('error')
+        return
+      }
+      const incoming: CatalogRow[] = Array.isArray(json.rows) ? json.rows : []
+      setSources(Array.isArray(json.sources) ? json.sources : [])
+      setRows(incoming.map((r) => ({ ...r, _key: _keyCounter++ })))
+      setPhase('review')
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : 'שגיאת רשת')
+      setPhase('error')
     }
   }
 
-  const submitUrl = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!url.trim()) return
-    setState({ kind: 'extracting', label: url })
+  function updateCell(key: number, col: ColDef, raw: string) {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r._key !== key) return r
+        let value: string | number | null
+        if (col.type === 'number') {
+          const n = Number(raw.replace(/[^\d.-]/g, ''))
+          value = raw.trim() === '' || !Number.isFinite(n) ? null : n
+        } else {
+          value = raw === '' ? null : raw
+        }
+        return { ...r, [col.key]: value }
+      })
+    )
+  }
+
+  const removeRow = (key: number) => setRows((prev) => prev.filter((r) => r._key !== key))
+
+  async function runImport() {
+    const clean: CatalogRow[] = rows
+      .filter((r) => (r.supplier_name && r.supplier_name.trim()) || (r.service_name && r.service_name.trim()))
+      .map((r) => {
+        const copy = { ...r } as { _key?: number }
+        delete copy._key
+        return copy as CatalogRow
+      })
+    if (clean.length === 0) {
+      setErrorMsg('אין שורות לייבוא. כל שורה צריכה לפחות שם ספק ושם שירות.')
+      return
+    }
+    setPhase('importing')
+    setErrorMsg('')
     try {
-      const res = await fetch('/api/admin/extract', {
+      const res = await fetch('/api/admin/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ rows: clean }),
       })
-      await handleExtractResponse(res, url)
-    } catch (err) {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: err instanceof Error ? err.message : 'unknown error',
-      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setErrorMsg(json.error || `שגיאה ${res.status}`)
+        setPhase('review')
+        return
+      }
+      setStats(json.stats)
+      setPhase('done')
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : 'שגיאת רשת')
+      setPhase('review')
     }
   }
 
-  const submitText = async (e: FormEvent) => {
-    e.preventDefault()
-    const trimmed = pastedText.trim()
-    if (!trimmed) return
-    const label = 'טקסט שהודבק'
-    setState({ kind: 'extracting', label })
-    try {
-      const res = await fetch('/api/admin/extract', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: trimmed, label }),
-      })
-      await handleExtractResponse(res, label)
-    } catch (err) {
-      setState({
-        kind: 'error',
-        stage: 'extraction',
-        message: err instanceof Error ? err.message : 'unknown error',
-      })
-    }
+  function reset() {
+    setFiles([])
+    setText('')
+    setUrls('')
+    setRows([])
+    setSources([])
+    setStats(null)
+    setErrorMsg('')
+    setPhase('idle')
   }
 
-  const busy = state.kind === 'extracting' || state.kind === 'pushing'
+  const doneRows = sources.filter((s) => s.status === 'done').reduce((n, s) => n + s.rows, 0)
+  const errorSources = sources.filter((s) => s.status === 'error')
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">ייבוא ממקור חיצוני</h1>
-        <p className="text-gray-600 text-sm mt-1">
-          העלה קובץ, הזן קישור, או הדבק טקסט. השירותים מחולצים אוטומטית
-          ונדחפים ל-Google Sheet לבדיקה לפני סנכרון למרקטפלייס.
+        <h1 className="text-2xl font-semibold text-gray-900">ייבוא חכם ממקורות חיצוניים</h1>
+        <p className="mt-1 text-sm text-gray-600">
+          העלו כמה קבצים יחד (PDF, Excel, Word, תמונות/צילומי מחירונים), הדביקו טקסט, או הזינו קישורים —
+          הכל במהלך אחד. ה-AI מחלץ את כל השירותים, אתם בודקים ומתקנים, ולוחצים ייבוא ישירות למרקטפלייס.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* File upload */}
-        <div className="bg-white border border-gray-200 rounded-xl p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <Upload className="w-5 h-5 text-gray-700" />
-            <h2 className="font-medium text-gray-900">העלאת קובץ</h2>
-          </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,.xls,.pdf,.docx,.doc,.txt,.csv"
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) submitFile(f)
-            }}
-            disabled={busy}
-            className="block w-full text-sm text-gray-600
-              file:mr-3 file:py-2 file:px-4
-              file:rounded-lg file:border-0
-              file:text-sm file:font-medium
-              file:bg-gray-900 file:text-white
-              hover:file:bg-gray-800
-              file:cursor-pointer file:transition
-              disabled:opacity-50"
-          />
-          <p className="text-xs text-gray-500 mt-2">
-            תומך: .xlsx, .xls, .pdf, .docx, .doc, .txt, .csv
-          </p>
-        </div>
-
-        {/* URL */}
-        <form
-          onSubmit={submitUrl}
-          className="bg-white border border-gray-200 rounded-xl p-5"
-        >
-          <div className="flex items-center gap-2 mb-3">
-            <Link2 className="w-5 h-5 text-gray-700" />
-            <h2 className="font-medium text-gray-900">קישור לאתר</h2>
-          </div>
-          <input
-            type="url"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://example.com/services"
-            dir="ltr"
-            disabled={busy}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50"
-          />
-          <button
-            type="submit"
-            disabled={busy || !url.trim()}
-            className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            חלץ מהקישור
-          </button>
-        </form>
-
-        {/* Pasted text */}
-        <form
-          onSubmit={submitText}
-          className="bg-white border border-gray-200 rounded-xl p-5"
-        >
-          <div className="flex items-center gap-2 mb-3">
-            <FileText className="w-5 h-5 text-gray-700" />
-            <h2 className="font-medium text-gray-900">הדבק טקסט</h2>
-          </div>
-          <textarea
-            value={pastedText}
-            onChange={(e) => setPastedText(e.target.value)}
-            placeholder="הדבק כאן רשימת שירותים מאימייל / WhatsApp / מסמך — בכל פורמט."
-            disabled={busy}
-            rows={4}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50 resize-none"
-          />
-          <button
-            type="submit"
-            disabled={busy || !pastedText.trim()}
-            className="mt-3 w-full bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            חלץ מהטקסט
-          </button>
-        </form>
-      </div>
-
-      {/* Status */}
-      {state.kind === 'extracting' && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center gap-3">
-          <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
-          <div>
-            <p className="font-medium text-blue-900">מחלץ נתונים…</p>
-            <p className="text-sm text-blue-700">{state.label}</p>
-            <p className="text-xs text-blue-600 mt-1">
-              קבצים מורכבים (PDF עם הרבה שירותים) יכולים לקחת עד 2 דקות.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {state.kind === 'pushing' && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center gap-3">
-          <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
-          <div>
-            <p className="font-medium text-blue-900">דוחף ל-Google Sheet…</p>
-            <p className="text-sm text-blue-700">
-              {state.rows_count} שורות מתוך: {state.label}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {state.kind === 'error' && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="font-medium text-red-900">
-              {state.stage === 'extraction' ? 'שגיאה בחילוץ' : 'שגיאה בדחיפה ל-Sheet'}
-            </p>
-            <p className="text-sm text-red-700 mt-1 font-mono break-all">
-              {state.message}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {state.kind === 'success' && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-3">
-          <div className="flex items-start gap-3">
-            <CheckCircle2 className="w-6 h-6 text-emerald-600 flex-shrink-0" />
-            <div className="flex-1">
-              <p className="font-semibold text-emerald-900 text-lg">
-                ✓ {state.rows_count} שירותים נדחפו ל-Sheet
-              </p>
-              <p className="text-sm text-emerald-700 mt-1">
-                מקור: {state.source_label}
-                {state.avg_confidence != null && (
-                  <span className="mr-2">
-                    · ביטחון ממוצע: {state.avg_confidence.toFixed(1)}/5
-                  </span>
-                )}
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <a
-              href={state.sheet_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition"
+      {/* ───────── INPUT (idle / extracting) ───────── */}
+      {(phase === 'idle' || phase === 'extracting' || phase === 'error') && (
+        <>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            {/* Files (multi + drag/drop + images) */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragOver(true)
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragOver(false)
+                addFiles(e.dataTransfer.files)
+              }}
+              className={`rounded-xl border-2 border-dashed p-5 transition-colors ${
+                dragOver ? 'border-brand-400 bg-brand-50/50' : 'border-gray-300 bg-white'
+              }`}
             >
-              פתח ב-Google Sheets
-              <ExternalLink className="w-4 h-4" />
-            </a>
-            <button
-              type="button"
-              onClick={() => setState({ kind: 'idle' })}
-              className="text-sm text-emerald-700 hover:text-emerald-900 px-3 py-2"
-            >
-              חלץ עוד אחד
-            </button>
-          </div>
-          <p className="text-xs text-emerald-700">
-            השורות ב-Sheet ב-status &quot;pending&quot;. בדוק / ערוך אותן שם,
-            ואז סמן כ-&quot;approved&quot; כדי שהן יסונכרנו למרקטפלייס.
-          </p>
-        </div>
-      )}
+              <div className="mb-3 flex items-center gap-2">
+                <Upload className="h-5 w-5 text-gray-700" />
+                <h2 className="font-medium text-gray-900">קבצים ותמונות</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={phase === 'extracting'}
+                className="w-full rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800 disabled:opacity-50"
+              >
+                בחרו קבצים
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPT}
+                className="hidden"
+                onChange={(e) => {
+                  addFiles(e.target.files)
+                  if (fileInputRef.current) fileInputRef.current.value = ''
+                }}
+              />
+              <p className="mt-2 text-center text-xs text-gray-500">או גררו לכאן · אפשר כמה יחד</p>
+              <p className="mt-1 text-center text-[11px] text-gray-400">
+                xlsx · pdf · docx · doc · csv · txt · png · jpg · webp
+              </p>
 
-      {state.kind === 'extracted_no_sheets' && (
-        <div className="space-y-3">
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
-            <div className="flex items-start gap-3">
-              <AlertCircle className="w-6 h-6 text-amber-600 flex-shrink-0" />
-              <div>
-                <p className="font-semibold text-amber-900">
-                  ✓ חולצו {state.rows.length} שירותים, אבל Google Sheets לא מוגדר עדיין
-                </p>
-                <p className="text-sm text-amber-700 mt-1">
-                  כדי לדחוף שורות אוטומטית, צריך להוסיף ל-.env.local:
-                </p>
-                <ul className="text-xs font-mono text-amber-800 mt-2 space-y-0.5">
-                  {state.setup_required.map((e) => (
-                    <li key={e}>· {e}</li>
+              {files.length > 0 && (
+                <ul className="mt-3 space-y-1.5">
+                  {files.map((f, i) => (
+                    <li
+                      key={f.name + i}
+                      className="flex items-center gap-2 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
+                    >
+                      {isImageName(f.name) ? (
+                        <ImageIcon className="h-3.5 w-3.5 shrink-0 text-brand-500" />
+                      ) : (
+                        <FileText className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+                      )}
+                      <span className="flex-1 truncate" title={f.name}>
+                        {f.name}
+                      </span>
+                      <button type="button" onClick={() => removeFile(i)} className="text-gray-400 hover:text-red-500">
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
                   ))}
                 </ul>
-                <p className="text-sm text-amber-700 mt-2">
-                  בקש מקלוד הוראות הגדרה — &quot;תן לי את שלבי ההגדרה של Google Sheets&quot;.
+              )}
+            </div>
+
+            {/* URLs */}
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <div className="mb-3 flex items-center gap-2">
+                <Link2 className="h-5 w-5 text-gray-700" />
+                <h2 className="font-medium text-gray-900">קישורים לאתרים</h2>
+              </div>
+              <textarea
+                value={urls}
+                onChange={(e) => setUrls(e.target.value)}
+                placeholder={'https://supplier-a.co.il\nhttps://supplier-b.co.il'}
+                dir="ltr"
+                rows={4}
+                disabled={phase === 'extracting'}
+                className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-transparent focus:ring-2 focus:ring-gray-900 disabled:bg-gray-50"
+              />
+              <p className="mt-2 text-xs text-gray-500">קישור בכל שורה. הטקסט שמשמאל יושלם אל תוך האתרים.</p>
+            </div>
+
+            {/* Pasted text */}
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <div className="mb-3 flex items-center gap-2">
+                <FileText className="h-5 w-5 text-gray-700" />
+                <h2 className="font-medium text-gray-900">הדבקת טקסט</h2>
+              </div>
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="הדביקו רשימת שירותים מאימייל / WhatsApp / מסמך — בכל פורמט."
+                rows={4}
+                disabled={phase === 'extracting'}
+                className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-transparent focus:ring-2 focus:ring-gray-900 disabled:bg-gray-50"
+              />
+              <p className="mt-2 text-xs text-gray-500">אם הזנתם גם קישור — הטקסט ישמש להשלמת מחירים וכמויות.</p>
+            </div>
+          </div>
+
+          {errorMsg && phase === 'error' && (
+            <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4">
+              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+              <div>
+                <p className="font-medium text-red-900">שגיאה בחילוץ</p>
+                <p className="mt-1 font-mono text-sm text-red-700">{errorMsg}</p>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={runExtract}
+              disabled={!hasInput || phase === 'extracting'}
+              className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {phase === 'extracting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {phase === 'extracting' ? 'מחלץ…' : 'חלץ נתונים'}
+            </button>
+            {hasInput && phase !== 'extracting' && (
+              <button type="button" onClick={reset} className="text-sm text-gray-500 hover:text-gray-900">
+                נקה
+              </button>
+            )}
+          </div>
+
+          {phase === 'extracting' && (
+            <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
+              <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+              <div>
+                <p className="font-medium text-blue-900">מחלץ נתונים מכל המקורות…</p>
+                <p className="mt-1 text-xs text-blue-600">
+                  קבצים מרובים / PDF גדולים עשויים לקחת עד 2–3 דקות. אל תסגרו את החלון.
                 </p>
               </div>
             </div>
+          )}
+        </>
+      )}
+
+      {/* ───────── REVIEW ───────── */}
+      {(phase === 'review' || phase === 'importing') && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <div className="flex items-center gap-3">
+              <CheckCircle2 className="h-6 w-6 text-emerald-600" />
+              <div>
+                <p className="font-semibold text-emerald-900">חולצו {rows.length} שירותים מוכנים לבדיקה</p>
+                <p className="text-sm text-emerald-700">
+                  ערכו כל תא ישירות בטבלה. הקטגוריה תמופה אוטומטית לאחת מ-9 הקטגוריות בעת הייבוא.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={runImport}
+                disabled={phase === 'importing' || rows.length === 0}
+                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {phase === 'importing' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+                {phase === 'importing' ? 'מייבא…' : `ייבא ${rows.length} למרקטפלייס`}
+              </button>
+              <button
+                type="button"
+                onClick={reset}
+                disabled={phase === 'importing'}
+                className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:text-gray-900 disabled:opacity-50"
+              >
+                התחל מחדש
+              </button>
+            </div>
           </div>
-          <details className="bg-white border border-gray-200 rounded-xl p-4">
-            <summary className="text-sm text-gray-600 cursor-pointer">
-              הצג {state.rows.length} שורות שחולצו (JSON)
-            </summary>
-            <pre
-              dir="ltr"
-              className="mt-3 text-xs text-gray-700 overflow-x-auto whitespace-pre max-h-96"
+
+          {/* per-source status */}
+          {sources.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {sources.map((s, i) => (
+                <span
+                  key={i}
+                  title={s.error || ''}
+                  className={`inline-flex max-w-xs items-center gap-1.5 truncate rounded-full px-3 py-1 text-xs ${
+                    s.status === 'done' ? 'bg-gray-100 text-gray-700' : 'bg-red-50 text-red-700'
+                  }`}
+                >
+                  {s.status === 'done' ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                  ) : (
+                    <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                  )}
+                  <span className="truncate">{s.label}</span>
+                  <span className="text-gray-400">· {s.status === 'done' ? `${s.rows} שורות` : 'נכשל'}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4">
+              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+              <p className="font-mono text-sm text-red-700">{errorMsg}</p>
+            </div>
+          )}
+
+          {/* editable table */}
+          {rows.length === 0 ? (
+            <p className="rounded-xl border border-gray-200 bg-white py-12 text-center text-gray-400">
+              לא חולצו שורות. {errorSources.length > 0 && 'בדקו את שגיאות המקורות למעלה.'}
+            </p>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 bg-gray-50 text-right">
+                    <th className="px-2 py-2 text-xs font-medium text-gray-400">#</th>
+                    {COLS.map((c) => (
+                      <th key={c.key} className={`px-2 py-2 text-xs font-medium text-gray-600 ${c.width}`}>
+                        {c.label}
+                      </th>
+                    ))}
+                    <th className="px-2 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row, idx) => (
+                    <tr key={row._key} className="border-b border-gray-100 last:border-0 hover:bg-gray-50/60">
+                      <td className="px-2 py-1.5 text-center text-xs text-gray-300">{idx + 1}</td>
+                      {COLS.map((c) => {
+                        const v = row[c.key]
+                        const val = v === null || v === undefined ? '' : String(v)
+                        return (
+                          <td key={c.key} className="px-1.5 py-1">
+                            {c.type === 'select' ? (
+                              <select
+                                value={val}
+                                onChange={(e) => updateCell(row._key, c, e.target.value)}
+                                className="w-full rounded border border-transparent bg-transparent px-1.5 py-1 text-sm hover:border-gray-200 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-brand-100"
+                              >
+                                <option value="">—</option>
+                                {c.options!.map((o) => (
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : c.type === 'textarea' ? (
+                              <textarea
+                                value={val}
+                                rows={1}
+                                onChange={(e) => updateCell(row._key, c, e.target.value)}
+                                className="w-full resize-y rounded border border-transparent bg-transparent px-1.5 py-1 text-sm hover:border-gray-200 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-brand-100"
+                              />
+                            ) : (
+                              <input
+                                type={c.type === 'number' ? 'number' : 'text'}
+                                value={val}
+                                onChange={(e) => updateCell(row._key, c, e.target.value)}
+                                dir={c.type === 'number' ? 'ltr' : 'rtl'}
+                                className="w-full rounded border border-transparent bg-transparent px-1.5 py-1 text-sm hover:border-gray-200 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-brand-100"
+                              />
+                            )}
+                          </td>
+                        )
+                      })}
+                      <td className="px-1.5 py-1 text-center">
+                        <button
+                          type="button"
+                          onClick={() => removeRow(row._key)}
+                          title="מחק שורה"
+                          className="text-gray-300 transition hover:text-red-500"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {phase === 'review' && rows.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setRows((p) => [...p, blankRow()])}
+              className="text-sm font-medium text-brand-600 hover:text-brand-700"
             >
-              {JSON.stringify(state.rows, null, 2)}
-            </pre>
-          </details>
+              + הוסף שורה ידנית
+            </button>
+          )}
+        </>
+      )}
+
+      {/* ───────── DONE ───────── */}
+      {phase === 'done' && stats && (
+        <div className="space-y-5">
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-6">
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="h-7 w-7 shrink-0 text-emerald-600" />
+              <div className="flex-1">
+                <p className="text-lg font-semibold text-emerald-900">הייבוא הושלם בהצלחה</p>
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <Stat label="שירותים חדשים" value={stats.inserted} tone="emerald" />
+                  <Stat label="שירותים עודכנו" value={stats.updated} tone="blue" />
+                  <Stat label="ספקים חדשים" value={stats.suppliers_created} tone="violet" />
+                  <Stat label="נכשלו" value={stats.failed} tone={stats.failed ? 'red' : 'gray'} />
+                </div>
+              </div>
+            </div>
+
+            {stats.failures.length > 0 && (
+              <details className="mt-4 rounded-lg bg-white/70 p-3">
+                <summary className="cursor-pointer text-sm text-amber-700">הצג {stats.failures.length} שורות שנכשלו</summary>
+                <ul className="mt-2 space-y-1 text-xs text-gray-600">
+                  {stats.failures.map((f, i) => (
+                    <li key={i}>
+                      <span className="font-medium">{f.service_name || '(ללא שם)'}</span> — {f.reason}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+
+            <div className="mt-5 flex flex-wrap gap-3">
+              <Link
+                href="/marketplace"
+                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-700"
+              >
+                צפה במרקטפלייס
+                <ArrowLeft className="h-4 w-4" />
+              </Link>
+              <Link
+                href="/admin/suppliers"
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+              >
+                ניהול ספקים
+              </Link>
+              <button
+                type="button"
+                onClick={reset}
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900"
+              >
+                ייבא עוד
+              </button>
+            </div>
+          </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function Stat({ label, value, tone }: { label: string; value: number; tone: 'emerald' | 'blue' | 'violet' | 'red' | 'gray' }) {
+  const tones: Record<string, string> = {
+    emerald: 'text-emerald-700',
+    blue: 'text-blue-700',
+    violet: 'text-violet-700',
+    red: 'text-red-600',
+    gray: 'text-gray-400',
+  }
+  return (
+    <div className="rounded-xl bg-white p-3 text-center shadow-sm">
+      <div className={`text-2xl font-bold ${tones[tone]}`}>{value}</div>
+      <div className="text-xs text-gray-500">{label}</div>
     </div>
   )
 }

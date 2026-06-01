@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { CatalogRow, ExtractedSource } from './types'
+import type { CatalogRow, ExtractedSource, ImageMediaType } from './types'
 import { CATALOG_COLUMNS } from './types'
 import { inferSourceSchema, applySchemaToRows } from './schema-mapper'
 import { multipassPdf } from './multipass'
@@ -28,7 +28,7 @@ const SYSTEM_PROMPT = `אתה עוזר חילוץ נתונים של פלטפור
 המשימה שלך: לחלץ שורות מובנות לקטלוג, אחת לכל שירות (וכל מדרגת תמחור — מספר ספציפי של משתתפים — נחשבת שורה נפרדת).
 
 הנחיות:
-- אם נתון חסר — החזר null, אל תמציא.
+- אם נתון חסר — לפני שתחזיר null, סרוק את המקור שלוש פעמים: (1) חפש ערך מפורש ומתויג; (2) חפש מילים נרדפות וראשי תיבות (משך≈זמן פעילות, עלות/עלות≈מחיר, "עד X איש"≈כמות); (3) הסק מההקשר (כותרות, שורות סמוכות, טבלאות). רק אם אחרי שלוש הסריקות הנתון באמת לא קיים — החזר null. null הוא מוצא אחרון, לא ברירת מחדל. לעולם אל תמציא.
 - supplier_category חייב להיות אחד מ: ${CATEGORY_VALUES.join(', ')}. נסה לבחור את המתאים ביותר; אם באמת אין התאמה, החזר null.
 - price_type: 'fixed' אם יש מחיר בודד, 'range' אם יש טווח (price_min ו-price_max), 'on_request' אם לא מצוין מחיר ספציפי.
 - location_mode: 'at_provider' = במתחם של הספק (קליניקה / סטודיו), 'at_client' = במשרד / במתחם של הלקוח, 'remote' = מקוון, 'hybrid' = שתי האפשרויות אפשריות. בחר את המתאים ביותר.
@@ -146,11 +146,31 @@ async function normalizeOne(
         type: 'document'
         source: { type: 'base64'; media_type: 'application/pdf'; data: string }
       }
+    | {
+        type: 'image'
+        source: { type: 'base64'; media_type: ImageMediaType; data: string }
+      }
 
   const messageContent: AnthropicContent[] = []
   const header = `מקור: ${source.source_label} (סוג: ${source.source_type})`
 
-  if (source.pdf_buffer) {
+  if (source.image_buffer && source.image_media_type) {
+    // Photo/scan of a price list → Claude reads the Hebrew text via vision.
+    messageContent.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: source.image_media_type,
+        data: source.image_buffer.toString('base64'),
+      },
+    })
+    messageContent.push({
+      type: 'text',
+      text:
+        `${header}\n\nקרא את התמונה המצורפת (כולל טקסט סרוק/מצולם בעברית) וחלץ ממנה את כל השירותים.\n` +
+        `שמור על הטקסט בעברית כפי שהוא מופיע. אם יש מדרגות תמחור — צור שורה לכל מדרגה.`,
+    })
+  } else if (source.pdf_buffer) {
     messageContent.push({
       type: 'document',
       source: {
@@ -178,7 +198,18 @@ async function normalizeOne(
       text: `${header}\n\nטקסט גולמי:\n${source.raw_text.slice(0, 80_000)}`,
     })
   } else {
-    throw new Error('Extractor produced no rows, no raw_text, and no pdf_buffer')
+    throw new Error('Extractor produced no rows, no raw_text, no image, and no pdf_buffer')
+  }
+
+  // Extra context the admin pasted alongside the source (e.g. prices not on the
+  // website) — used to fill fields the primary source is missing.
+  if (source.supplementary_text) {
+    messageContent.push({
+      type: 'text',
+      text:
+        `מידע נוסף שסיפק המשתמש על הספק — שלב אותו עם המקור והשלם איתו שדות חסרים ` +
+        `(במיוחד מחירים, יחידות תמחור, כמויות וזמני פעילות):\n${source.supplementary_text.slice(0, 20_000)}`,
+    })
   }
 
   // Haiku 4.5 instead of Sonnet 4.6 because:
@@ -239,6 +270,18 @@ async function normalizeOne(
  * CHUNK_SIZE-row batches and process in parallel. Otherwise (PDF/Word/URL
  * raw text), one call.
  */
+/** Fill supplier_name from the filename hint when the model left it null
+ *  (one uploaded file is almost always a single supplier). */
+function applySupplierHint(rows: CatalogRow[], source: ExtractedSource): CatalogRow[] {
+  const hint = source.supplier_hint?.trim()
+  if (!hint) return rows
+  return rows.map((r) =>
+    r.supplier_name == null || r.supplier_name === ''
+      ? { ...r, supplier_name: hint }
+      : r
+  )
+}
+
 export async function normalizeWithClaude(
   source: ExtractedSource
 ): Promise<CatalogRow[]> {
@@ -247,17 +290,19 @@ export async function normalizeWithClaude(
 
   const client = new Anthropic({ apiKey })
 
-  // Multipass for PDFs — outline scan + per-service expansion, ~1-2K
-  // tokens output per call. Sidesteps both max_tokens truncation and
-  // per-minute rate limits on messy docs (10+ pages, many pricing tiers).
-  if (source.pdf_buffer) {
-    return multipassPdf(client, source.pdf_buffer, source.source_label)
-  }
+  let rows: CatalogRow[]
 
-  // Fast path: structured input with consistent columns. One LLM call to
-  // learn the schema, then pure-JS row transformation. Avoids per-row
-  // token spend that trips low-tier rate limits at scale.
-  if (source.rows && source.rows.length >= STRUCTURED_FAST_PATH_THRESHOLD) {
+  if (source.pdf_buffer) {
+    // Multipass for PDFs — outline scan + per-service expansion, ~1-2K
+    // tokens output per call. Sidesteps both max_tokens truncation and
+    // per-minute rate limits on messy docs (10+ pages, many pricing tiers).
+    rows = await multipassPdf(client, source.pdf_buffer, source.source_label)
+  } else if (source.image_buffer) {
+    // Photo/scan → single Haiku vision call.
+    rows = await normalizeOne(client, source)
+  } else if (source.rows && source.rows.length >= STRUCTURED_FAST_PATH_THRESHOLD) {
+    // Fast path: structured input with consistent columns. One LLM call to
+    // learn the schema, then pure-JS row transformation.
     const headers = Object.keys(source.rows[0] ?? {})
     const schema = await inferSourceSchema(
       client,
@@ -265,12 +310,9 @@ export async function normalizeWithClaude(
       source.rows,
       source.source_label
     )
-    return applySchemaToRows(source.rows, schema)
-  }
-
-  // Slow path: free text OR a small number of structured rows (likely a
-  // sample where the per-row cost is small enough). Chunk + parallelize.
-  if (source.rows && source.rows.length > CHUNK_SIZE) {
+    rows = applySchemaToRows(source.rows, schema)
+  } else if (source.rows && source.rows.length > CHUNK_SIZE) {
+    // Slow path: many structured rows → chunk + parallelize.
     const chunks: Record<string, unknown>[][] = []
     for (let i = 0; i < source.rows.length; i += CHUNK_SIZE) {
       chunks.push(source.rows.slice(i, i + CHUNK_SIZE))
@@ -278,8 +320,11 @@ export async function normalizeWithClaude(
     const results = await pMap(chunks, MAX_CONCURRENCY, (chunk) =>
       normalizeOne(client, source, chunk)
     )
-    return results.flat()
+    rows = results.flat()
+  } else {
+    // Free text or a small number of structured rows → one call.
+    rows = await normalizeOne(client, source, source.rows)
   }
 
-  return normalizeOne(client, source, source.rows)
+  return applySupplierHint(rows, source)
 }

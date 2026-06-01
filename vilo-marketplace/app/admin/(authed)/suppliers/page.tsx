@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
-import { Search, ExternalLink, Pencil } from 'lucide-react'
+import { Search, ExternalLink, Pencil, Sparkles, ArrowLeft } from 'lucide-react'
 import ActiveToggle from '../ActiveToggle'
 
 interface PageProps {
@@ -56,6 +56,15 @@ export default async function SuppliersListPage({ searchParams }: PageProps) {
         <p className="text-sm text-gray-500">
           {(count || 0).toLocaleString('he-IL')} ספקים{' '}
           {showInactive ? '(כולל לא פעילים)' : '(פעילים בלבד)'}
+        </p>
+      </div>
+
+      <div className="flex items-start gap-2 rounded-xl border border-brand-100 bg-brand-50/60 px-4 py-3 text-sm text-brand-800">
+        <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
+        <p>
+          לעריכה מהירה לחצו <strong>«ערוך בעמוד»</strong> על ספק — תגיעו לעמוד שלו בדיוק כפי שהמבקרים רואים אותו,
+          ותוכלו ללחוץ על כל שדה (שם, תיאור, מחירים, משך, מיקום, לוגו ועוד) ולערוך במקום. השינויים נשמרים מיד
+          ומתעדכנים בכל המרקטפלייס.
         </p>
       </div>
 
@@ -127,7 +136,7 @@ export default async function SuppliersListPage({ searchParams }: PageProps) {
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
                         <Link
-                          href={`/admin/suppliers/${s.id}`}
+                          href={`/supplier/${s.id}`}
                           className="hover:text-gray-700"
                         >
                           <h2 className="font-medium text-gray-900 truncate hover:underline">
@@ -175,13 +184,23 @@ export default async function SuppliersListPage({ searchParams }: PageProps) {
                           {s.contact_email}
                         </a>
                       )}
-                      <Link
-                        href={`/admin/suppliers/${s.id}`}
-                        className="inline-flex items-center gap-1 text-gray-600 hover:text-gray-900 ml-auto"
-                      >
-                        <Pencil className="w-3 h-3" />
-                        ערוך
-                      </Link>
+                      <div className="ml-auto flex items-center gap-2">
+                        <Link
+                          href={`/admin/suppliers/${s.id}`}
+                          className="text-gray-400 hover:text-gray-700"
+                          title="טופס עריכה מתקדם"
+                        >
+                          טופס
+                        </Link>
+                        <Link
+                          href={`/supplier/${s.id}`}
+                          className="inline-flex items-center gap-1 rounded-lg bg-gray-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-gray-800"
+                        >
+                          <Pencil className="h-3 w-3" />
+                          ערוך בעמוד
+                          <ArrowLeft className="h-3 w-3" />
+                        </Link>
+                      </div>
                     </div>
                   </div>
                 </div>

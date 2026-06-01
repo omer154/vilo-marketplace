@@ -47,8 +47,8 @@ export default async function AuthedAdminLayout({
               <Link href="/admin/extract" className="hover:text-gray-900">
                 ייבוא
               </Link>
-              <Link href="/admin/audit" className="hover:text-gray-900">
-                שינויים אחרונים
+              <Link href="/marketplace" className="hover:text-gray-900">
+                מרקטפלייס ↗
               </Link>
             </nav>
           </div>
