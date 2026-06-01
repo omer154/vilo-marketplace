@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { motion } from 'framer-motion'
-import { Clock, Users as UsersIcon, Coins, CheckCircle, Pencil } from 'lucide-react'
+import { Clock, Users as UsersIcon, Coins, CheckCircle, Pencil, ArrowLeft } from 'lucide-react'
 import {
   Heart,
   Users,
@@ -193,6 +193,7 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
           <span className="text-xs text-gray-500 truncate group-hover/sup:text-brand-600 group-hover/sup:underline">
             {supplierName}
           </span>
+          <ArrowLeft className="h-3 w-3 shrink-0 text-brand-400 opacity-0 transition-opacity group-hover/sup:opacity-100" />
         </Link>
 
         {/* Service name */}

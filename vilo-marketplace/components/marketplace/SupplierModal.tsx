@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Clock, Users, Coins, MapPin, Pencil } from 'lucide-react'
+import { X, Clock, Users, Coins, MapPin, Pencil, Building2, ArrowLeft } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import {
   Heart,
@@ -200,8 +200,11 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
             {service.service_name}
           </h2>
 
-          {/* Supplier row — logo + name + sub-category */}
-          <div className="flex items-center gap-2 mb-6">
+          {/* Supplier row — links through to the full supplier profile page */}
+          <Link
+            href={`/supplier/${service.supplier_id}`}
+            className="group -mx-1 mb-4 inline-flex items-center gap-2 rounded-lg px-1 py-1 transition-colors hover:bg-brand-50"
+          >
             {service.supplier_logo_url && (
               // eslint-disable-next-line @next/next/no-img-element
               <img
@@ -213,11 +216,17 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
                 }}
               />
             )}
-            <p className="text-sm text-gray-500">
+            <span className="text-sm text-gray-600 group-hover:text-brand-700">
               {service.supplier_name}
               {service.category_secondary && ` · ${service.category_secondary}`}
-            </p>
-          </div>
+            </span>
+            <ArrowLeft className="h-3.5 w-3.5 text-brand-400 opacity-70 transition-opacity group-hover:opacity-100" />
+          </Link>
+
+          {/* Service description */}
+          {service.description_short && (
+            <p className="mb-6 leading-relaxed text-gray-600">{service.description_short}</p>
+          )}
 
           {/* Info grid */}
           <div className="grid grid-cols-2 gap-3 mb-6">
@@ -291,8 +300,8 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
             </div>
           )}
 
-          {/* CTA + admin edit */}
-          <div className={isAdmin ? 'flex gap-2' : ''}>
+          {/* CTAs */}
+          <div className="flex flex-col gap-2 sm:flex-row">
             <a
               href={
                 service.supplier_name
@@ -303,12 +312,19 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
             >
               לפרטים נוספים פנו ל-Vilo
             </a>
+            <Link
+              href={`/supplier/${service.supplier_id}`}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-brand-200 bg-white px-4 py-3 font-medium text-brand-700 transition-colors hover:bg-brand-50"
+            >
+              <Building2 className="h-4 w-4" />
+              עמוד הספק
+            </Link>
             {isAdmin && (
               <Link
                 href={`/admin/services/${service.id}`}
                 aria-label="ערוך שירות"
                 title="ערוך שירות (אדמין)"
-                className="inline-flex items-center gap-2 bg-gray-900 hover:bg-gray-800 text-white rounded-xl px-4 py-3 font-medium transition-colors"
+                className="inline-flex items-center justify-center gap-2 bg-gray-900 hover:bg-gray-800 text-white rounded-xl px-4 py-3 font-medium transition-colors"
               >
                 <Pencil className="w-4 h-4" />
                 ערוך
