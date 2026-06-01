@@ -36,9 +36,13 @@ export default function AdminLoginPage() {
     setState('working')
     setErrorMsg('')
     const supabase = createSupabaseBrowserClient()
+    // Always use the origin the browser is actually on, so the email link returns
+    // to THIS site. (A baked-in NEXT_PUBLIC_APP_URL=localhost would otherwise send
+    // production users to localhost.) Env var is only a non-browser fallback.
     const appUrl =
+      (typeof window !== 'undefined' ? window.location.origin : '') ||
       process.env.NEXT_PUBLIC_APP_URL ||
-      (typeof window !== 'undefined' ? window.location.origin : '')
+      ''
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
       options: { emailRedirectTo: `${appUrl}/api/auth/callback?next=/admin` },
