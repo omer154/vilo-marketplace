@@ -15,8 +15,10 @@ export type CategorySlug =
 export interface Supplier {
   id: string
   name: string
+  name_en?: string | null
   slug: string
   logo_url: string | null
+  website?: string | null
   contact_email: string | null
   description_short: string | null
   is_active: boolean

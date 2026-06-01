@@ -42,12 +42,15 @@ export async function PATCH(
     'price_min',
     'price_max',
     'price_type',
+    'pricing_unit',
     'min_participants',
     'max_participants',
     'duration_minutes',
     'location_mode',
     'category_primary',
+    'category_secondary',
     'service_name',
+    'description_short',
     'notes',
   ])
   const update: Record<string, unknown> = {}

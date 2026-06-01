@@ -166,8 +166,13 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
           )}
         </div>
 
-        {/* Supplier */}
-        <div className="flex items-center gap-2">
+        {/* Supplier — links through to the premium supplier profile page. */}
+        <Link
+          href={`/supplier/${service.supplier_id}`}
+          onClick={(e) => e.stopPropagation()}
+          className="group/sup flex items-center gap-2 transition-opacity hover:opacity-90"
+          title={`לעמוד הספק ${supplierName}`}
+        >
           {service.supplier_logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -175,9 +180,6 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
               alt={supplierName}
               className="w-7 h-7 rounded-full object-cover bg-white border border-gray-100 shrink-0"
               onError={(e) => {
-                // Hide broken images and let CSS show no fallback —
-                // the supplier name text right next to it still
-                // identifies the vendor.
                 ;(e.currentTarget as HTMLImageElement).style.display = 'none'
               }}
             />
@@ -188,10 +190,10 @@ export default function SupplierCard({ service, onClick }: SupplierCardProps) {
               {getInitials(supplierName)}
             </div>
           )}
-          <span className="text-xs text-gray-500 truncate">
+          <span className="text-xs text-gray-500 truncate group-hover/sup:text-brand-600 group-hover/sup:underline">
             {supplierName}
           </span>
-        </div>
+        </Link>
 
         {/* Service name */}
         <h3 className="font-semibold text-base text-gray-900 truncate leading-tight">
