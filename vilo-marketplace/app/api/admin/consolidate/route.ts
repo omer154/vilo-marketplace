@@ -72,9 +72,9 @@ const SYSTEM_PROMPT = `אתה מאחד ומסנכרן קטלוג שירותים 
 - סנכרון מחירים: שלב את המחירים מהטקסט החופשי לתוך השירות המתאים. מחירון לפי מספר משתתפים = מדרגות תמחור: צור שורה לכל מדרגה עם capacity_min=capacity_max=מספר המשתתפים ו-price_ils=המחיר, pricing_unit='group', price_type='fixed', על השירות הרלוונטי. אם יש מחיר-לאדם לאחר הנחה — שורה עם pricing_unit='person'.
 - שירותים שמופיעים רק בטקסט (לדוגמה "בר לאירועים" עם מינימום מחיר/כמות) — צור עבורם שורה אם אינם קיימים כבר.
 - אל תזרוק מידע מחיר: הערות כמו כולל/לא כולל מע"מ, עלות הגעה/נסיעות, תוספות, מקדמה ואזורי שירות — שמור ב-supplier_notes או ב-service_description של השורה הרלוונטית.
-- פריטים בודדים מתוך תפריט/רשימה (לדוגמה מנות, קוקטיילים, פריטי מוצר) שאין להם מחיר עצמאי — סכם אותם לתוך התיאור (service_description) של השירות הרלוונטי במקום שורות נפרדות.
+- פריטים בודדים מתוך תפריט/רשימה (מנות, קוקטיילים, פריטי מוצר וכו') שאין להם מחיר עצמאי — חובה לסכם אותם לתוך ה-service_description של השירות הרלוונטי (לדוגמה רשימת הקוקטיילים נכנסת לתיאור הסדנה/הבר). אל תחזיר אותם כשורות שירות נפרדות.
 - אחֵד כפילויות אמיתיות; שמור שירותים ומדרגות תמחור שונים באמת.
-- supplier_category: שמור את קטגוריית-המשנה בעברית כפי שהיא.
+- supplier_category: תן ערך עקבי לשירותים מאותו סוג של אותו ספק (לדוגמה כל מדרגות הסדנה תחת אותה קטגוריה). אל תמציא קטגוריות חדשות.
 - שמור טקסט בעברית verbatim. אל תמציא נתונים שאינם במקור. החזר את כל השירותים.`
 
 function applySupplierOverride(rows: CatalogRow[], name: string | null): CatalogRow[] {
@@ -150,15 +150,19 @@ export async function POST(request: NextRequest) {
     }
     const out = toolUse.input as { rows?: CatalogRow[] }
     const merged = Array.isArray(out.rows) && out.rows.length > 0 ? out.rows : inputRows
-    // Never let the merge silently drop priced/tier rows. If the model returned
-    // fewer rows that carry a price or capacity than it was given, distrust the
-    // merge and keep the originals (prices must survive).
-    const pricedCount = (rs: CatalogRow[]) =>
-      rs.filter(
-        (r) =>
-          r.price_ils != null || r.price_min != null || r.capacity_min != null || r.capacity_max != null
-      ).length
-    const safe = pricedCount(merged) >= pricedCount(inputRows) ? merged : inputRows
+    // Guard against real price LOSS only — NOT against row consolidation. A good
+    // merge legitimately has fewer rows (folded menu items, deduped equal-price
+    // tiers); only fall back to the raw rows if a distinct price value the model
+    // was given went missing from the result.
+    const priceSet = (rs: CatalogRow[]) =>
+      new Set(rs.filter((r) => r.price_ils != null).map((r) => r.price_ils))
+    const before = priceSet(inputRows)
+    const after = priceSet(merged)
+    const lostPrice = [...before].some((p) => !after.has(p))
+    const safe = lostPrice ? inputRows : merged
+    console.log(
+      `[consolidate] in=${inputRows.length} out=${merged.length} prices ${before.size}->${after.size}${lostPrice ? ' REJECTED(price lost) kept raw' : ' used merged'}`
+    )
     // Belt-and-suspenders: re-apply the explicit supplier name in case the model drifted.
     return NextResponse.json({ rows: applySupplierOverride(safe, supplierName) })
   } catch (err) {
