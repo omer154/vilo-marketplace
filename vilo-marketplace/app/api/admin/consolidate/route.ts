@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
     const parts: string[] = []
     if (supplierName) parts.push(`שם הספק (חובה להחיל על כל השורות): ${supplierName}`)
     parts.push(
-      `שירותים שחולצו מהקבצים/אתרים (JSON, ${inputRows.length} שורות):\n${JSON.stringify(inputRows, null, 2)}`
+      `שורות שחולצו מכל המקורות (JSON, ${inputRows.length} שורות):\n${JSON.stringify(inputRows, null, 2)}`
     )
     if (freeText) parts.push(`טקסט חופשי / מחירון שהמשתמש סיפק:\n${freeText.slice(0, 20_000)}`)
     parts.push(
@@ -126,7 +126,10 @@ export async function POST(request: NextRequest) {
     )
 
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+      // Haiku, not Sonnet: the user's tier throttles Sonnet output to ~8K
+      // tokens/min, which made this regenerate-all-rows call time out (504).
+      // Haiku has a far higher per-minute output budget and is plenty capable here.
+      model: 'claude-haiku-4-5',
       max_tokens: 16_000,
       system: SYSTEM_PROMPT,
       tools: [
@@ -147,8 +150,17 @@ export async function POST(request: NextRequest) {
     }
     const out = toolUse.input as { rows?: CatalogRow[] }
     const merged = Array.isArray(out.rows) && out.rows.length > 0 ? out.rows : inputRows
+    // Never let the merge silently drop priced/tier rows. If the model returned
+    // fewer rows that carry a price or capacity than it was given, distrust the
+    // merge and keep the originals (prices must survive).
+    const pricedCount = (rs: CatalogRow[]) =>
+      rs.filter(
+        (r) =>
+          r.price_ils != null || r.price_min != null || r.capacity_min != null || r.capacity_max != null
+      ).length
+    const safe = pricedCount(merged) >= pricedCount(inputRows) ? merged : inputRows
     // Belt-and-suspenders: re-apply the explicit supplier name in case the model drifted.
-    return NextResponse.json({ rows: applySupplierOverride(merged, supplierName) })
+    return NextResponse.json({ rows: applySupplierOverride(safe, supplierName) })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error'
     console.error('Consolidate route error:', message)

@@ -175,8 +175,10 @@ export default function ExtractPage() {
         },
       })
     }
-    const textOnly = !hasFiles && !hasUrls && hasText
-    if (textOnly) {
+    // Always extract the pasted text as its own source, so the prices it holds
+    // (participant tiers, bar minimum, travel cost…) materialize as real rows.
+    // They then survive even if the merge step is slow/unavailable.
+    if (hasText) {
       jobs.push({
         label: 'טקסט שהודבק',
         build: () => {
@@ -207,24 +209,24 @@ export default function ExtractPage() {
       setSources([...stat])
     }
 
-    // Merge + sync: unify the supplier and fold the pasted price text into the
-    // matching services (tiers, bar service, VAT notes…) in one pass.
+    // Merge + sync: unify the supplier and tidy the rows (relabel tier rows onto
+    // their workshop, fold individual cocktails into descriptions, dedup). The
+    // prices already live in the extracted rows, so this step only polishes them.
     let finalRows = acc
-    const infoText = !textOnly && hasText ? text.trim() : ''
     const doneCount = stat.filter((s) => s.status === 'done').length
-    const needConsolidate = acc.length > 0 && (supplier !== '' || infoText !== '' || doneCount > 1)
+    const needConsolidate = acc.length > 0 && (supplier !== '' || doneCount > 1)
     if (needConsolidate) {
       setPhase('consolidating')
       try {
         const res = await fetch('/api/admin/consolidate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rows: acc, supplierName: supplier || null, freeText: infoText || null }),
+          body: JSON.stringify({ rows: acc, supplierName: supplier || null }),
         })
         const json = await res.json().catch(() => ({}))
         if (res.ok && Array.isArray(json.rows) && json.rows.length > 0) finalRows = json.rows
       } catch {
-        // keep the un-merged rows on failure — never lose data
+        // keep the un-merged rows on failure — the prices are already in them
       }
     }
 
