@@ -20,6 +20,7 @@ import {
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import AdminProbe from '@/components/layout/AdminProbe'
 import InlineField from '@/components/admin/InlineField'
+import SupplierModal from '@/components/marketplace/SupplierModal'
 import type { CategorySlug, Service, Supplier } from '@/lib/types'
 import {
   CATEGORY_META,
@@ -87,7 +88,7 @@ function StatChip({ icon: Icon, children }: { icon: React.ComponentType<{ classN
   )
 }
 
-function ServiceCard({ service }: { service: Service }) {
+function ServiceCard({ service, onOpen }: { service: Service; onOpen: () => void }) {
   const isAdmin = useMarketplaceStore((s) => s.isAdmin)
   const ep = `/api/admin/services/${service.id}`
   const cat = CATEGORY_META[service.category_primary]
@@ -101,7 +102,10 @@ function ServiceCard({ service }: { service: Service }) {
     <motion.div
       whileHover={{ y: -2 }}
       transition={{ duration: 0.2 }}
-      className="flex flex-col rounded-2xl border border-gray-100 bg-white p-5 shadow-card transition-shadow hover:shadow-card-hover"
+      onClick={isAdmin ? undefined : onOpen}
+      className={`flex flex-col rounded-2xl border border-gray-100 bg-white p-5 shadow-card transition-shadow hover:shadow-card-hover ${
+        isAdmin ? '' : 'cursor-pointer'
+      }`}
     >
       <div className="mb-3 flex items-center justify-between gap-2">
         {cat && (
@@ -205,6 +209,7 @@ function ServiceCard({ service }: { service: Service }) {
 export default function SupplierProfile({ supplier, services }: { supplier: Supplier; services: Service[] }) {
   const isAdmin = useMarketplaceStore((s) => s.isAdmin)
   const supEp = `/api/admin/suppliers/${supplier.id}`
+  const [selected, setSelected] = useState<Service | null>(null)
 
   // Derived stats (computed from real services — never fabricated).
   const cats = [...new Set(services.map((s) => s.category_primary))] as CategorySlug[]
@@ -335,7 +340,7 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {svcs.map((s) => (
-                    <ServiceCard key={s.id} service={s} />
+                    <ServiceCard key={s.id} service={s} onOpen={() => setSelected(s)} />
                   ))}
                 </div>
               </section>
@@ -343,6 +348,13 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
           })
         )}
       </main>
+
+      {selected && (
+        <SupplierModal
+          service={{ ...selected, supplier_name: supplier.name, supplier_logo_url: supplier.logo_url }}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   )
 }

@@ -1,33 +1,48 @@
 'use client'
 
 import { useState, FormEvent } from 'react'
-import { Mail, Loader2, CheckCircle2 } from 'lucide-react'
+import { Mail, Lock, Loader2, CheckCircle2 } from 'lucide-react'
 import { createSupabaseBrowserClient } from '@/lib/supabase/client'
 
+const INPUT =
+  'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50'
+
 export default function AdminLoginPage() {
+  const [mode, setMode] = useState<'password' | 'magic'>('password')
   const [email, setEmail] = useState('')
-  const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
+  const [password, setPassword] = useState('')
+  const [state, setState] = useState<'idle' | 'working' | 'sent' | 'error'>('idle')
   const [errorMsg, setErrorMsg] = useState('')
 
-  const handleSubmit = async (e: FormEvent) => {
+  async function handlePassword(e: FormEvent) {
+    e.preventDefault()
+    if (!email.trim() || !password) return
+    setState('working')
+    setErrorMsg('')
+    const supabase = createSupabaseBrowserClient()
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+    if (error) {
+      setState('error')
+      setErrorMsg('מייל או סיסמה שגויים. נסו שוב, או היכנסו עם קישור למייל.')
+      return
+    }
+    // Full navigation so the new session cookie is read by the middleware.
+    window.location.assign('/admin')
+  }
+
+  async function handleMagic(e: FormEvent) {
     e.preventDefault()
     if (!email.trim()) return
-
-    setState('sending')
+    setState('working')
     setErrorMsg('')
-
     const supabase = createSupabaseBrowserClient()
     const appUrl =
       process.env.NEXT_PUBLIC_APP_URL ||
       (typeof window !== 'undefined' ? window.location.origin : '')
-
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: {
-        emailRedirectTo: `${appUrl}/api/auth/callback?next=/admin`,
-      },
+      options: { emailRedirectTo: `${appUrl}/api/auth/callback?next=/admin` },
     })
-
     if (error) {
       setState('error')
       setErrorMsg(error.message)
@@ -41,11 +56,13 @@ export default function AdminLoginPage() {
       <div className="w-full max-w-md bg-white border border-gray-200 rounded-2xl p-8 space-y-6">
         <div className="text-center space-y-2">
           <div className="w-12 h-12 rounded-full bg-gray-900 text-white mx-auto flex items-center justify-center">
-            <Mail className="w-5 h-5" />
+            {mode === 'password' ? <Lock className="w-5 h-5" /> : <Mail className="w-5 h-5" />}
           </div>
           <h1 className="text-xl font-semibold text-gray-900">כניסת מנהל</h1>
           <p className="text-sm text-gray-600">
-            הזן את כתובת המייל שלך. נשלח לך קישור חד-פעמי לכניסה.
+            {mode === 'password'
+              ? 'הזינו מייל וסיסמה כדי להיכנס.'
+              : 'הזינו מייל ונשלח לכם קישור כניסה חד-פעמי.'}
           </p>
         </div>
 
@@ -54,46 +71,72 @@ export default function AdminLoginPage() {
             <CheckCircle2 className="w-5 h-5 mt-0.5 flex-shrink-0" />
             <div className="text-sm">
               <p className="font-medium">קישור נשלח אל {email}</p>
-              <p className="text-emerald-700 mt-1">
-                בדוק את המייל ולחץ על הקישור כדי להיכנס. ניתן לסגור את החלון הזה.
-              </p>
+              <p className="text-emerald-700 mt-1">בדקו את המייל ולחצו על הקישור כדי להיכנס.</p>
             </div>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={mode === 'password' ? handlePassword : handleMagic} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                מייל
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">מייל</label>
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                disabled={state === 'sending'}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50"
+                disabled={state === 'working'}
+                className={INPUT}
                 dir="ltr"
                 required
               />
             </div>
 
-            {state === 'error' && (
-              <p className="text-sm text-red-600">{errorMsg || 'אירעה שגיאה. נסה שוב.'}</p>
+            {mode === 'password' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">סיסמה</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  disabled={state === 'working'}
+                  className={INPUT}
+                  dir="ltr"
+                  required
+                />
+              </div>
             )}
+
+            {state === 'error' && <p className="text-sm text-red-600">{errorMsg}</p>}
 
             <button
               type="submit"
-              disabled={state === 'sending' || !email.trim()}
+              disabled={
+                state === 'working' || !email.trim() || (mode === 'password' && !password)
+              }
               className="w-full bg-gray-900 hover:bg-gray-800 text-white font-medium py-2.5 rounded-lg text-sm transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              {state === 'sending' ? (
+              {state === 'working' ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  שולח...
+                  רגע...
                 </>
+              ) : mode === 'password' ? (
+                'כניסה'
               ) : (
                 'שלח קישור כניסה'
               )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setMode(mode === 'password' ? 'magic' : 'password')
+                setState('idle')
+                setErrorMsg('')
+              }}
+              className="w-full text-center text-sm text-gray-500 hover:text-gray-900 transition"
+            >
+              {mode === 'password' ? 'כניסה עם קישור למייל במקום' : 'כניסה עם סיסמה במקום'}
             </button>
           </form>
         )}
