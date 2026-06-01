@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import { createSupabaseServerClient, getCurrentUser } from '@/lib/supabase/server'
 import { checkSameOrigin } from '@/lib/csrf'
 
@@ -66,6 +67,44 @@ export async function PATCH(
   update.updated_by = user.id
 
   const { error } = await supabase.from('services').update(update).eq('id', id)
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+  return NextResponse.json({ success: true })
+}
+
+// DELETE /api/admin/services/[id] — permanently remove a single service.
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const csrfErr = checkSameOrigin(request)
+  if (csrfErr) {
+    return NextResponse.json({ error: `csrf: ${csrfErr}` }, { status: 403 })
+  }
+  const user = await getCurrentUser()
+  if (!user) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  }
+  const supabase = await createSupabaseServerClient()
+  const { data: adminRow, error: adminErr } = await supabase
+    .from('admins')
+    .select('user_id')
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (adminErr || !adminRow) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  }
+
+  const { id } = await params
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) {
+    return NextResponse.json({ error: 'server misconfigured' }, { status: 500 })
+  }
+  // Service-role client so the delete isn't blocked by a missing RLS delete policy.
+  const admin = createClient(url, serviceKey, { auth: { persistSession: false } })
+  const { error } = await admin.from('services').delete().eq('id', id)
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }

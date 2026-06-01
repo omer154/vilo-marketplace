@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 import {
@@ -69,11 +69,9 @@ function ServicesTable({ services }: { services: Service[] }) {
   const [saving, setSaving] = useState<Set<string | number>>(new Set())
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  // is_active rendered as a string so the select binds; everything else passes through.
-  const rows = useMemo(
-    () => services.map((s) => ({ ...s, is_active: String(s.is_active) })),
-    [services]
-  )
+  // is_active rendered as a string so the select binds. Local state so edits +
+  // row deletions reflect immediately (the services prop doesn't change on save).
+  const [list, setList] = useState(() => services.map((s) => ({ ...s, is_active: String(s.is_active) })))
 
   async function patch(id: string, colKey: string, value: string | number | null) {
     const body: Record<string, unknown> =
@@ -98,6 +96,7 @@ function ServicesTable({ services }: { services: Service[] }) {
   }
 
   function commit(id: string | number, colKey: string, value: string | number | null) {
+    setList((prev) => prev.map((r) => (r.id === id ? { ...r, [colKey]: value } : r)))
     const key = `${id}:${colKey}`
     const existing = timers.current.get(key)
     if (existing) clearTimeout(existing)
@@ -110,8 +109,34 @@ function ServicesTable({ services }: { services: Service[] }) {
     )
   }
 
+  async function remove(id: string | number) {
+    if (typeof window !== 'undefined' && !window.confirm('למחוק את השירות לצמיתות? לא ניתן לשחזר.')) return
+    setSaving((s) => new Set(s).add(id))
+    try {
+      const res = await fetch(`/api/admin/services/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'שגיאה')
+      setList((prev) => prev.filter((r) => r.id !== id))
+      pushToast('השירות נמחק', 'success')
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : 'המחיקה נכשלה', 'error')
+    } finally {
+      setSaving((s) => {
+        const n = new Set(s)
+        n.delete(id)
+        return n
+      })
+    }
+  }
+
   return (
-    <EditableGrid rows={rows} columns={SERVICE_COLS} rowId={(r) => r.id} onCommit={commit} savingRowIds={saving} />
+    <EditableGrid
+      rows={list}
+      columns={SERVICE_COLS}
+      rowId={(r) => r.id}
+      onCommit={commit}
+      onRemoveRow={remove}
+      savingRowIds={saving}
+    />
   )
 }
 
