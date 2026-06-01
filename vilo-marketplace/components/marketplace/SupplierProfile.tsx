@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 import {
@@ -36,6 +36,84 @@ import {
   locationLabel,
   completeness,
 } from '@/lib/ui-meta'
+import EditableGrid, { type GridCol } from '@/components/admin/EditableGrid'
+
+// Columns for the admin services table (drag-fill bulk editing).
+const SERVICE_COLS: GridCol[] = [
+  { key: 'service_name', label: 'שם השירות', type: 'text', width: 'min-w-[170px]' },
+  { key: 'category_primary', label: 'קטגוריה', type: 'select', options: CATEGORY_OPTIONS, width: 'min-w-[120px]' },
+  { key: 'price', label: 'מחיר ₪', type: 'number', width: 'min-w-[90px]' },
+  { key: 'pricing_unit', label: 'יחידה', type: 'select', options: PRICING_UNIT_OPTIONS, width: 'min-w-[110px]' },
+  { key: 'min_participants', label: 'מ־', type: 'number', width: 'min-w-[64px]' },
+  { key: 'max_participants', label: 'עד', type: 'number', width: 'min-w-[64px]' },
+  { key: 'duration_minutes', label: 'דק׳', type: 'number', width: 'min-w-[70px]' },
+  { key: 'location_mode', label: 'מיקום', type: 'select', options: LOCATION_MODE_OPTIONS, width: 'min-w-[110px]' },
+  { key: 'description_short', label: 'תיאור', type: 'textarea', width: 'min-w-[220px]' },
+  { key: 'notes', label: 'הערות', type: 'textarea', width: 'min-w-[160px]' },
+  {
+    key: 'is_active',
+    label: 'מצב',
+    type: 'select',
+    options: [
+      { value: 'true', label: 'מוצג' },
+      { value: 'false', label: 'מוסתר' },
+    ],
+    width: 'min-w-[90px]',
+  },
+]
+
+/** Admin-only spreadsheet view of a supplier's services, with drag-to-fill.
+ *  Each committed cell PATCHes that service (debounced); fill commits many at once. */
+function ServicesTable({ services }: { services: Service[] }) {
+  const pushToast = useMarketplaceStore((s) => s.pushToast)
+  const [saving, setSaving] = useState<Set<string | number>>(new Set())
+  const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // is_active rendered as a string so the select binds; everything else passes through.
+  const rows = useMemo(
+    () => services.map((s) => ({ ...s, is_active: String(s.is_active) })),
+    [services]
+  )
+
+  async function patch(id: string, colKey: string, value: string | number | null) {
+    const body: Record<string, unknown> =
+      colKey === 'is_active' ? { is_active: value === 'true' } : { [colKey]: value }
+    setSaving((s) => new Set(s).add(id))
+    try {
+      const res = await fetch(`/api/admin/services/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'שגיאה')
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : 'השמירה נכשלה', 'error')
+    } finally {
+      setSaving((s) => {
+        const n = new Set(s)
+        n.delete(id)
+        return n
+      })
+    }
+  }
+
+  function commit(id: string | number, colKey: string, value: string | number | null) {
+    const key = `${id}:${colKey}`
+    const existing = timers.current.get(key)
+    if (existing) clearTimeout(existing)
+    timers.current.set(
+      key,
+      setTimeout(() => {
+        timers.current.delete(key)
+        void patch(String(id), colKey, value)
+      }, 400)
+    )
+  }
+
+  return (
+    <EditableGrid rows={rows} columns={SERVICE_COLS} rowId={(r) => r.id} onCommit={commit} savingRowIds={saving} />
+  )
+}
 
 /** Avatar that, for admins, doubles as a click-to-upload logo editor. */
 function LogoBlock({
@@ -277,6 +355,7 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
   const isAdmin = useMarketplaceStore((s) => s.isAdmin)
   const supEp = `/api/admin/suppliers/${supplier.id}`
   const [selected, setSelected] = useState<Service | null>(null)
+  const [view, setView] = useState<'cards' | 'table'>('cards')
 
   // Derived stats (computed from real services — never fabricated).
   const cats = [...new Set(services.map((s) => s.category_primary))] as CategorySlug[]
@@ -387,13 +466,33 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
       {/* Services */}
       <main className="mx-auto max-w-5xl px-4 py-8">
         {isAdmin && (
-          <div className="mb-6 flex items-center gap-2 rounded-xl border border-brand-100 bg-brand-50/60 px-4 py-2.5 text-sm text-brand-700">
-            <Sparkles className="h-4 w-4" />
-            מצב ניהול פעיל — לחצו על כל שדה כדי לערוך אותו; השינויים נשמרים אוטומטית.
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-brand-100 bg-brand-50/60 px-4 py-2.5 text-sm text-brand-700">
+            <span className="inline-flex items-center gap-2">
+              <Sparkles className="h-4 w-4" />
+              מצב ניהול פעיל — לחצו על שדה כדי לערוך; בתצוגת טבלה אפשר לגרור ערך לשורות רבות בבת אחת.
+            </span>
+            <span className="inline-flex overflow-hidden rounded-lg border border-brand-200">
+              <button
+                type="button"
+                onClick={() => setView('cards')}
+                className={`px-3 py-1 text-xs font-medium transition ${view === 'cards' ? 'bg-brand-600 text-white' : 'bg-white text-brand-700 hover:bg-brand-50'}`}
+              >
+                כרטיסיות
+              </button>
+              <button
+                type="button"
+                onClick={() => setView('table')}
+                className={`px-3 py-1 text-xs font-medium transition ${view === 'table' ? 'bg-brand-600 text-white' : 'bg-white text-brand-700 hover:bg-brand-50'}`}
+              >
+                טבלה
+              </button>
+            </span>
           </div>
         )}
 
-        {services.length === 0 ? (
+        {isAdmin && view === 'table' ? (
+          <ServicesTable services={services} />
+        ) : services.length === 0 ? (
           <p className="py-12 text-center text-gray-400">לא נמצאו שירותים פעילים לספק זה.</p>
         ) : (
           [...byCat.entries()].map(([c, svcs]) => {

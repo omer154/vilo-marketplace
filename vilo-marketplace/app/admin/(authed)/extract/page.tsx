@@ -10,13 +10,13 @@ import {
   AlertCircle,
   CheckCircle2,
   X,
-  Trash2,
   Sparkles,
   Image as ImageIcon,
   ArrowLeft,
   Database,
 } from 'lucide-react'
 import type { CatalogRow } from '@/lib/extractors/types'
+import EditableGrid, { type GridCol } from '@/components/admin/EditableGrid'
 
 // ── Editable-cell config (DB enums, Hebrew labels) ───────────────────
 const PRICING_UNITS = [
@@ -244,23 +244,6 @@ export default function ExtractPage() {
     setPhase('review')
   }
 
-  function updateCell(key: number, col: ColDef, raw: string) {
-    setRows((prev) =>
-      prev.map((r) => {
-        if (r._key !== key) return r
-        let value: string | number | null
-        if (col.type === 'number') {
-          const n = Number(raw.replace(/[^\d.-]/g, ''))
-          value = raw.trim() === '' || !Number.isFinite(n) ? null : n
-        } else {
-          value = raw === '' ? null : raw
-        }
-        return { ...r, [col.key]: value }
-      })
-    )
-  }
-
-  const removeRow = (key: number) => setRows((prev) => prev.filter((r) => r._key !== key))
 
   async function runImport() {
     const clean: CatalogRow[] = rows
@@ -616,75 +599,15 @@ export default function ExtractPage() {
               לא חולצו שורות. {errorSources.length > 0 && 'בדקו את שגיאות המקורות למעלה.'}
             </p>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 bg-gray-50 text-right">
-                    <th className="px-2 py-2 text-xs font-medium text-gray-400">#</th>
-                    {COLS.map((c) => (
-                      <th key={c.key} className={`px-2 py-2 text-xs font-medium text-gray-600 ${c.width}`}>
-                        {c.label}
-                      </th>
-                    ))}
-                    <th className="px-2 py-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row, idx) => (
-                    <tr key={row._key} className="border-b border-gray-100 last:border-0 hover:bg-gray-50/60">
-                      <td className="px-2 py-1.5 text-center text-xs text-gray-300">{idx + 1}</td>
-                      {COLS.map((c) => {
-                        const v = row[c.key]
-                        const val = v === null || v === undefined ? '' : String(v)
-                        return (
-                          <td key={c.key} className="px-1.5 py-1">
-                            {c.type === 'select' ? (
-                              <select
-                                value={val}
-                                onChange={(e) => updateCell(row._key, c, e.target.value)}
-                                className="w-full rounded border border-transparent bg-transparent px-1.5 py-1 text-sm hover:border-gray-200 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-brand-100"
-                              >
-                                <option value="">—</option>
-                                {c.options!.map((o) => (
-                                  <option key={o.value} value={o.value}>
-                                    {o.label}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : c.type === 'textarea' ? (
-                              <textarea
-                                value={val}
-                                rows={1}
-                                onChange={(e) => updateCell(row._key, c, e.target.value)}
-                                className="w-full resize-y rounded border border-transparent bg-transparent px-1.5 py-1 text-sm hover:border-gray-200 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-brand-100"
-                              />
-                            ) : (
-                              <input
-                                type={c.type === 'number' ? 'number' : 'text'}
-                                value={val}
-                                onChange={(e) => updateCell(row._key, c, e.target.value)}
-                                dir={c.type === 'number' ? 'ltr' : 'rtl'}
-                                className="w-full rounded border border-transparent bg-transparent px-1.5 py-1 text-sm hover:border-gray-200 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-brand-100"
-                              />
-                            )}
-                          </td>
-                        )
-                      })}
-                      <td className="px-1.5 py-1 text-center">
-                        <button
-                          type="button"
-                          onClick={() => removeRow(row._key)}
-                          title="מחק שורה"
-                          className="text-gray-300 transition hover:text-red-500"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <EditableGrid
+              rows={rows}
+              columns={COLS as GridCol[]}
+              rowId={(r) => r._key}
+              onCommit={(id, colKey, value) =>
+                setRows((prev) => prev.map((r) => (r._key === id ? { ...r, [colKey]: value } : r)))
+              }
+              onRemoveRow={(id) => setRows((prev) => prev.filter((r) => r._key !== id))}
+            />
           )}
 
           {phase === 'review' && rows.length > 0 && (
