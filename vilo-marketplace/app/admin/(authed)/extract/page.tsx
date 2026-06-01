@@ -141,26 +141,72 @@ export default function ExtractPage() {
     setPhase('extracting')
     setErrorMsg('')
     setSources([])
-    const form = new FormData()
-    files.forEach((f) => form.append('files', f))
-    if (text.trim()) form.append('text', text.trim())
-    if (urls.trim()) form.append('urls', urls.trim())
-    try {
-      const res = await fetch('/api/admin/extract', { method: 'POST', body: form })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setErrorMsg(json.error || `שגיאה ${res.status}`)
-        setPhase('error')
-        return
-      }
-      const incoming: CatalogRow[] = Array.isArray(json.rows) ? json.rows : []
-      setSources(Array.isArray(json.sources) ? json.sources : [])
-      setRows(incoming.map((r) => ({ ...r, _key: _keyCounter++ })))
-      setPhase('review')
-    } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : 'שגיאת רשת')
-      setPhase('error')
+    setRows([])
+
+    // One request per source keeps every call small & fast. A single batch of
+    // several heavy PDFs can exceed Vercel's per-request memory/time budget
+    // (which surfaced as a bare 500). Sequential here = isolated + live progress.
+    const jobs: { label: string; build: () => FormData }[] = []
+    files.forEach((f) =>
+      jobs.push({
+        label: f.name,
+        build: () => {
+          const fd = new FormData()
+          fd.append('files', f)
+          return fd
+        },
+      })
+    )
+    if (urls.trim()) {
+      jobs.push({
+        label: 'אתרים',
+        build: () => {
+          const fd = new FormData()
+          fd.append('urls', urls.trim())
+          if (text.trim()) fd.append('text', text.trim())
+          return fd
+        },
+      })
+    } else if (text.trim()) {
+      jobs.push({
+        label: 'טקסט שהודבק',
+        build: () => {
+          const fd = new FormData()
+          fd.append('text', text.trim())
+          return fd
+        },
+      })
     }
+
+    const acc: CatalogRow[] = []
+    const stat: SourceStatus[] = []
+    for (const job of jobs) {
+      try {
+        const res = await fetch('/api/admin/extract', { method: 'POST', body: job.build() })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          stat.push({ label: job.label, status: 'error', rows: 0, error: json.error || `שגיאה ${res.status}` })
+        } else {
+          const rows: CatalogRow[] = Array.isArray(json.rows) ? json.rows : []
+          acc.push(...rows)
+          if (Array.isArray(json.sources) && json.sources.length) stat.push(...json.sources)
+          else stat.push({ label: job.label, status: 'done', rows: rows.length, error: null })
+        }
+      } catch (e) {
+        stat.push({ label: job.label, status: 'error', rows: 0, error: e instanceof Error ? e.message : 'שגיאת רשת' })
+      }
+      setSources([...stat])
+    }
+
+    setRows(acc.map((r) => ({ ...r, _key: _keyCounter++ })))
+    if (acc.length === 0) {
+      setErrorMsg(
+        stat.some((s) => s.status === 'error')
+          ? 'החילוץ נכשל עבור המקורות. בדקו את הפירוט למטה ונסו שוב.'
+          : 'לא נמצאו שירותים במקורות שסיפקתם.'
+      )
+    }
+    setPhase('review')
   }
 
   function updateCell(key: number, col: ColDef, raw: string) {
@@ -375,14 +421,37 @@ export default function ExtractPage() {
           </div>
 
           {phase === 'extracting' && (
-            <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
-              <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-              <div>
-                <p className="font-medium text-blue-900">מחלץ נתונים מכל המקורות…</p>
-                <p className="mt-1 text-xs text-blue-600">
-                  קבצים מרובים / PDF גדולים עשויים לקחת עד 2–3 דקות. אל תסגרו את החלון.
-                </p>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
+                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                <div>
+                  <p className="font-medium text-blue-900">מחלץ נתונים — כל מקור בתורו…</p>
+                  <p className="mt-1 text-xs text-blue-600">
+                    כל קובץ/מקור מעובד בנפרד כדי לשמור על יציבות. אל תסגרו את החלון.
+                  </p>
+                </div>
               </div>
+              {sources.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {sources.map((s, i) => (
+                    <span
+                      key={i}
+                      title={s.error || ''}
+                      className={`inline-flex max-w-xs items-center gap-1.5 truncate rounded-full px-3 py-1 text-xs ${
+                        s.status === 'done' ? 'bg-gray-100 text-gray-700' : 'bg-red-50 text-red-700'
+                      }`}
+                    >
+                      {s.status === 'done' ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                      )}
+                      <span className="truncate">{s.label}</span>
+                      <span className="text-gray-400">· {s.status === 'done' ? `${s.rows} שורות` : 'נכשל'}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </>

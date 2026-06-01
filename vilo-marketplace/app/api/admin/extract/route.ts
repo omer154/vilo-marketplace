@@ -117,6 +117,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
 
+  try {
   let form: FormData
   try {
     form = await request.formData()
@@ -201,4 +202,9 @@ export async function POST(request: NextRequest) {
   const rows = results.flatMap((r) => r.rows)
 
   return NextResponse.json({ rows, sources: statuses, total: rows.length })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'unknown error'
+    console.error('Extract route error:', message)
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
 }
