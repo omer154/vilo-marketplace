@@ -1,6 +1,7 @@
 'use client'
 
-import { Search, Sparkles, Loader2 } from 'lucide-react'
+import { Search, Sparkles, Loader2, LayoutDashboard } from 'lucide-react'
+import Link from 'next/link'
 import { useCallback, useRef, useState } from 'react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 
@@ -9,6 +10,7 @@ export default function Header() {
   const applyAIFilters = useMarketplaceStore((s) => s.applyAIFilters)
   const openConcierge = useMarketplaceStore((s) => s.openConcierge)
   const pushToast = useMarketplaceStore((s) => s.pushToast)
+  const isAdmin = useMarketplaceStore((s) => s.isAdmin)
   const [searchValue, setSearchValue] = useState('')
   const [isExtracting, setIsExtracting] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -106,6 +108,17 @@ export default function Header() {
             className="w-full bg-white/10 border border-white/20 rounded-lg pr-10 pl-4 py-2 text-sm text-white placeholder-gray-400 outline-none focus:bg-white/15 focus:border-white/30 transition-colors text-right"
           />
         </div>
+
+        {/* Admin zone — only for signed-in admins (AdminProbe sets this). */}
+        {isAdmin && (
+          <Link
+            href="/admin"
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-white/25 px-3 py-2 text-sm font-medium text-white/90 transition-colors hover:bg-white/10"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            <span>אזור ניהול</span>
+          </Link>
+        )}
 
         {/* Concierge Button */}
         <button
