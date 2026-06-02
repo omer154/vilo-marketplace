@@ -35,7 +35,7 @@ const EXTRACT_MODEL = 'claude-haiku-4-5'
 const RECONCILE_MODEL = 'claude-haiku-4-5'
 const WINDOW_SIZE = 3
 const WINDOW_OVERLAP = 1
-const WINDOW_CONCURRENCY = 3
+const WINDOW_CONCURRENCY = 5
 const WINDOW_MAX_TOKENS = 8_000
 const RECONCILE_MAX_TOKENS = 1_500
 
@@ -171,11 +171,10 @@ async function pMap<T, R>(
 }
 
 async function slicePdfPages(
-  buffer: Buffer,
+  src: PDFDocument,
   startPage: number,
   endPage: number
 ): Promise<Buffer> {
-  const src = await PDFDocument.load(buffer)
   const total = src.getPageCount()
   const start = Math.max(0, startPage - 1)
   const end = Math.min(total, endPage)
@@ -215,14 +214,13 @@ interface WindowRow extends CatalogRow {
 
 async function extractWindow(
   client: Anthropic,
-  pdfBuffer: Buffer,
+  sliced: Buffer,
   windowStart: number,
   windowEnd: number,
   label: string
 ): Promise<WindowRow[]> {
-  const sliced = await slicePdfPages(pdfBuffer, windowStart, windowEnd)
   const tag = `window:${windowStart}-${windowEnd}`
-  console.log(`[${tag}] sliced ${sliced.length} bytes`)
+  console.log(`[${tag}] ${sliced.length} bytes`)
 
   const response = await withRateLimitRetry(
     () =>
@@ -535,7 +533,11 @@ export async function multipassPdf(
   pdfBuffer: Buffer,
   label: string
 ): Promise<CatalogRow[]> {
-  const totalPages = (await PDFDocument.load(pdfBuffer)).getPageCount()
+  // Load the PDF ONCE and reuse it for slicing. Re-loading a large multi-MB PDF
+  // per window (≈25 windows for a 50-page doc) was slow + memory-heavy enough to
+  // time out / OOM the function — the cause of big PDFs failing.
+  const srcDoc = await PDFDocument.load(pdfBuffer)
+  const totalPages = srcDoc.getPageCount()
   console.log(`[multipass] "${label}" ${totalPages} pages`)
 
   const windows = makeWindows(totalPages, WINDOW_SIZE, WINDOW_OVERLAP)
@@ -543,11 +545,18 @@ export async function multipassPdf(
     `[multipass] ${windows.length} windows: ${windows.map(([s, e]) => `${s}-${e}`).join(', ')}`
   )
 
-  // Pass 1: extract every window in parallel.
+  // Slice every window up-front, sequentially (cheap CPU work; avoids concurrent
+  // pdf-lib access to the shared source doc).
+  const slices: Buffer[] = []
+  for (const [start, end] of windows) {
+    slices.push(await slicePdfPages(srcDoc, start, end))
+  }
+
+  // Pass 1: extract every window in parallel (the slow part is the API calls).
   const windowRows = await pMap(
     windows,
     WINDOW_CONCURRENCY,
-    ([start, end]) => extractWindow(client, pdfBuffer, start, end, label),
+    ([start, end], i) => extractWindow(client, slices[i], start, end, label),
     'multipass.windows'
   )
   const allRows: WindowRow[] = windowRows.flat()
