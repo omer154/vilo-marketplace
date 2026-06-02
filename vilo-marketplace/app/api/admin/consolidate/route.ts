@@ -5,7 +5,10 @@ import { checkSameOrigin } from '@/lib/csrf'
 import { CATALOG_COLUMNS, type CatalogRow } from '@/lib/extractors/types'
 
 export const runtime = 'nodejs'
-export const maxDuration = 90
+// Same budget as /extract: a ~120-row Haiku merge can run >90s under tier
+// throttling and used to 504. It still degrades gracefully (returns un-merged
+// rows), but the extra headroom lets the merge actually finish.
+export const maxDuration = 300
 
 // Above this many rows we skip the AI merge (output would risk max_tokens) and
 // just apply the deterministic supplier-name override.
