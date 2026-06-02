@@ -213,13 +213,10 @@ export async function POST(request: NextRequest) {
           rows,
         }
       } catch (e) {
+        const msg = e instanceof Error ? e.message : 'שגיאת חילוץ'
+        console.error(`[extract] source "${source.source_label}" failed: ${msg}`)
         return {
-          status: {
-            label: source.source_label,
-            status: 'error',
-            rows: 0,
-            error: e instanceof Error ? e.message : 'שגיאת חילוץ',
-          },
+          status: { label: source.source_label, status: 'error', rows: 0, error: msg },
           rows: [],
         }
       }

@@ -105,21 +105,31 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+// Transient Anthropic statuses worth retrying: rate limit + server overload.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 529])
+
 async function withRateLimitRetry<T>(
   fn: () => Promise<T>,
-  label: string
+  label: string,
+  attempts = 3
 ): Promise<T> {
-  try {
-    return await fn()
-  } catch (err) {
-    const e = err as { status?: number; headers?: Record<string, string> }
-    if (e?.status !== 429) throw err
-    const retryAfter = Number(e.headers?.['retry-after']) || 60
-    const waitMs = Math.min(retryAfter * 1000 + 1000, 65_000)
-    console.warn(`[${label}] 429 — sleeping ${waitMs}ms then retrying once.`)
-    await sleep(waitMs)
-    return await fn()
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      const e = err as { status?: number; headers?: Record<string, string> }
+      if (!RETRYABLE_STATUS.has(e?.status ?? 0) || attempt === attempts) throw err
+      const retryAfter = Number(e.headers?.['retry-after'])
+      const waitMs = retryAfter
+        ? Math.min(retryAfter * 1000 + 1000, 65_000)
+        : Math.min(2_000 * 2 ** (attempt - 1) + 500, 20_000)
+      console.warn(`[${label}] ${e.status} — retry ${attempt}/${attempts - 1} in ${waitMs}ms`)
+      await sleep(waitMs)
+    }
   }
+  throw lastErr
 }
 
 /** Bounded-concurrency parallel map. Errors are logged + skipped per-item;

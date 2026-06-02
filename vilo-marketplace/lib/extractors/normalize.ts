@@ -138,20 +138,29 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** Retry an async fn once on Anthropic 429. Waits for the suggested retry
- *  window or 65s, whichever is shorter. */
-async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn()
-  } catch (err) {
-    const e = err as { status?: number; headers?: Record<string, string> }
-    if (e?.status !== 429) throw err
-    const retryAfter = Number(e.headers?.['retry-after']) || 60
-    const waitMs = Math.min(retryAfter * 1000 + 1000, 65_000)
-    console.warn(`Anthropic 429 — sleeping ${waitMs}ms then retrying once.`)
-    await sleep(waitMs)
-    return await fn()
+// Transient Anthropic statuses worth retrying: rate limit + server overload.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 529])
+
+/** Retry an async fn on transient Anthropic errors (429 / 5xx / overloaded) with
+ *  backoff. Honors retry-after for 429s. */
+async function withRateLimitRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      const e = err as { status?: number; headers?: Record<string, string> }
+      if (!RETRYABLE_STATUS.has(e?.status ?? 0) || attempt === attempts) throw err
+      const retryAfter = Number(e.headers?.['retry-after'])
+      const waitMs = retryAfter
+        ? Math.min(retryAfter * 1000 + 1000, 65_000)
+        : Math.min(2_000 * 2 ** (attempt - 1) + 500, 20_000)
+      console.warn(`Anthropic ${e.status} — retry ${attempt}/${attempts - 1} in ${waitMs}ms`)
+      await sleep(waitMs)
+    }
   }
+  throw lastErr
 }
 
 async function normalizeOne(
