@@ -324,7 +324,18 @@ export async function normalizeWithClaude(
     // Multipass for PDFs — outline scan + per-service expansion, ~1-2K
     // tokens output per call. Sidesteps both max_tokens truncation and
     // per-minute rate limits on messy docs (10+ pages, many pricing tiers).
-    rows = await multipassPdf(client, source.pdf_buffer, source.source_label)
+    try {
+      rows = await multipassPdf(client, source.pdf_buffer, source.source_label)
+    } catch {
+      rows = []
+    }
+    if (rows.length === 0) {
+      // The outline scan found no "services" — e.g. a pure pricing-table PDF
+      // (tiers by participant count, with no service descriptions). Fall back to
+      // a single full-PDF extraction so the price tiers still come through; the
+      // consolidate step then attaches them to the matching service.
+      rows = await normalizeOne(client, source)
+    }
   } else if (source.image_buffer) {
     // Photo/scan → single Haiku vision call.
     rows = await normalizeOne(client, source)
