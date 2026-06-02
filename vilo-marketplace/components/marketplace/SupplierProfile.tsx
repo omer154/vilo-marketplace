@@ -428,9 +428,14 @@ export default function SupplierProfile({
       {/* Hero header */}
       <header className="relative overflow-hidden border-b border-gray-100 bg-gradient-to-bl from-brand-50 via-white to-white">
         <div className="mx-auto max-w-5xl px-4 py-8 sm:py-10">
-          <Link href="/marketplace" className="mb-6 inline-flex items-center gap-1.5 text-sm text-gray-500 transition-colors hover:text-brand-600">
+          {/* Back link follows how you arrived: editing (from the admin
+              suppliers list) → back there; plain browsing → back to marketplace. */}
+          <Link
+            href={isAdmin ? '/admin/suppliers' : '/marketplace'}
+            className="mb-6 inline-flex items-center gap-1.5 text-sm text-gray-500 transition-colors hover:text-brand-600"
+          >
             <ArrowRight className="h-4 w-4" />
-            חזרה למרקטפלייס
+            {isAdmin ? 'חזרה לכל הספקים' : 'חזרה למרקטפלייס'}
           </Link>
 
           {!supplier.is_active && (
