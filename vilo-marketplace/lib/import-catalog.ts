@@ -320,6 +320,45 @@ async function readSchemaColumns(
 
 // ── Orchestrator ─────────────────────────────────────────────────────
 
+/** Bounded-concurrency map (index order preserved). */
+async function pMap<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = next++
+      if (i >= items.length) break
+      results[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+/** The exact tuple upsertOneRow matches on. Deduping by this before the
+ *  parallel pass stops two identical rows from racing into two inserts. */
+function upsertKey(row: CatalogRow): string {
+  const durMin = row.duration_hours != null ? Math.round(row.duration_hours * 60) : ''
+  return [
+    normalizeSupplierName(row.supplier_name || ''),
+    (row.service_name || '').trim().toLowerCase(),
+    row.capacity_min ?? '',
+    row.capacity_max ?? '',
+    row.supplier_category ?? '',
+    durMin,
+    row.price_ils ?? '',
+  ].join('|')
+}
+
+// Concurrent service upserts. PostgREST pools connections, so a modest fan-out
+// keeps a 200+ row import well within the function budget without overwhelming
+// the DB.
+const IMPORT_CONCURRENCY = 8
+
 /** Import a batch of reviewed catalog rows into suppliers + services. */
 export async function importCatalogRows(rows: CatalogRow[]): Promise<ImportStats> {
   const supabase = getServiceRoleClient()
@@ -343,48 +382,61 @@ export async function importCatalogRows(rows: CatalogRow[]): Promise<ImportStats
   const categoryMap =
     categoryStrings.length > 0 ? await mapCategoriesToSlugs(anthropic, categoryStrings) : {}
 
-  const supplierCache = new Map<string, string>()
-
+  // Validate + dedupe by the upsert key (so the parallel pass below can't race
+  // two identical rows into duplicate inserts, and exact dups collapse).
+  const seen = new Set<string>()
+  const valid: CatalogRow[] = []
   for (const row of rows) {
-    const fail = (reason: string) => {
-      stats.failed++
-      stats.failures.push({ service_name: row.service_name, reason })
-      console.warn(`[import] row "${row.service_name}" failed: ${reason}`)
-    }
-
     if (!row.supplier_name) {
-      fail('missing supplier_name')
+      stats.failed++
+      stats.failures.push({ service_name: row.service_name, reason: 'missing supplier_name' })
       continue
     }
     if (!row.service_name) {
-      fail('missing service_name')
+      stats.failed++
+      stats.failures.push({ service_name: row.service_name, reason: 'missing service_name' })
       continue
     }
+    const k = upsertKey(row)
+    if (seen.has(k)) continue
+    seen.add(k)
+    valid.push(row)
+  }
 
-    let supplierId = supplierCache.get(row.supplier_name)
+  // Resolve every unique supplier FIRST, sequentially — concurrent inserts of
+  // the same new supplier would otherwise create duplicates.
+  const supplierCache = new Map<string, string>()
+  const uniqueSupplierNames = [...new Set(valid.map((r) => r.supplier_name as string))]
+  for (const name of uniqueSupplierNames) {
+    const sample = valid.find((r) => r.supplier_name === name)!
+    const result = await findOrCreateSupplier(supabase, sample, schemaColumns)
+    if ('error' in result) continue // rows for this supplier fail in the pass below
+    supplierCache.set(name, result.id)
+    if (result.created) stats.suppliers_created++
+  }
+
+  // Upsert all services in parallel. Stat mutations are safe: JS runs one
+  // continuation at a time, so the ++ between awaits never tears.
+  await pMap(valid, IMPORT_CONCURRENCY, async (row) => {
+    const supplierId = supplierCache.get(row.supplier_name as string)
     if (!supplierId) {
-      const result = await findOrCreateSupplier(supabase, row, schemaColumns)
-      if ('error' in result) {
-        fail(result.error)
-        continue
-      }
-      supplierId = result.id
-      if (result.created) stats.suppliers_created++
-      supplierCache.set(row.supplier_name, supplierId)
+      stats.failed++
+      stats.failures.push({ service_name: row.service_name, reason: 'supplier resolve failed' })
+      return
     }
-
     const slug = row.supplier_category
       ? categoryMap[row.supplier_category] || 'consulting'
       : 'consulting'
-
     const result = await upsertOneRow(supabase, row, supplierId, slug, schemaColumns)
     if (typeof result === 'object' && 'error' in result) {
-      fail(result.error)
-      continue
+      stats.failed++
+      stats.failures.push({ service_name: row.service_name, reason: result.error })
+      console.warn(`[import] row "${row.service_name}" failed: ${result.error}`)
+      return
     }
     if (result === 'updated') stats.updated++
     else stats.inserted++
-  }
+  })
 
   console.log(
     `[import] ${stats.inserted} inserted, ${stats.updated} updated, ${stats.failed} failed, ${stats.suppliers_created} new suppliers`

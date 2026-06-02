@@ -5,7 +5,9 @@ import { importCatalogRows } from '@/lib/import-catalog'
 import type { CatalogRow } from '@/lib/extractors/types'
 
 export const runtime = 'nodejs'
-export const maxDuration = 120
+// Large catalogs (a topic × several duration tiers) can be 200+ rows. The
+// importer parallelizes the per-row upserts, but keep generous headroom.
+export const maxDuration = 300
 
 /**
  * POST /api/admin/import — write reviewed catalog rows straight into the DB.
