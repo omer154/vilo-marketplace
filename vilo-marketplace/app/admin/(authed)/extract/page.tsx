@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import type { CatalogRow } from '@/lib/extractors/types'
 import EditableGrid, { type GridCol } from '@/components/admin/EditableGrid'
+import { createSupabaseBrowserClient } from '@/lib/supabase/client'
 
 // ── Editable-cell config (DB enums, Hebrew labels) ───────────────────
 const PRICING_UNITS = [
@@ -124,6 +125,7 @@ export default function ExtractPage() {
   const [rows, setRows] = useState<EditableRow[]>([])
   const [stats, setStats] = useState<ImportStats | null>(null)
   const [dragOver, setDragOver] = useState(false)
+  const [uploadingLabel, setUploadingLabel] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const addFiles = useCallback((list: FileList | null) => {
@@ -146,64 +148,74 @@ export default function ExtractPage() {
     setSources([])
     setRows([])
 
-    const hasFiles = files.length > 0
+    setUploadingLabel(null)
     const hasUrls = urls.trim() !== ''
     const hasText = text.trim() !== ''
     const supplier = batchSupplier.trim()
 
+    const browser = createSupabaseBrowserClient()
+
+    // Upload a file DIRECTLY to Supabase Storage via a one-time signed URL.
+    // This bypasses Vercel's 4.5MB function-body limit entirely — the extract
+    // route then downloads the file server-side. Returns the object path.
+    async function uploadToStorage(file: File): Promise<{ path: string; fileName: string }> {
+      const r = await fetch('/api/admin/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name }),
+      })
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(j.error || `שגיאת הכנה להעלאה (${r.status})`)
+      const { error } = await browser.storage.from('imports').uploadToSignedUrl(j.path, j.token, file)
+      if (error) throw new Error(error.message || 'שגיאת העלאה לאחסון')
+      return { path: j.path, fileName: file.name }
+    }
+
+    async function callExtract(
+      payload: Record<string, unknown>
+    ): Promise<{ rows: CatalogRow[]; sources?: SourceStatus[] }> {
+      const res = await fetch('/api/admin/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || `שגיאה ${res.status}`)
+      return {
+        rows: Array.isArray(json.rows) ? json.rows : [],
+        sources: Array.isArray(json.sources) ? json.sources : undefined,
+      }
+    }
+
     // Heavy sources are extracted one request each (stable, no whole-batch 500).
-    // The pasted text is the "info/pricing layer" — when there are files/urls it
-    // is NOT extracted on its own; it's folded into the services in the merge step.
-    const jobs: { label: string; build: () => FormData }[] = []
+    // Files upload to Storage first, then extract by path. Pasted text is its
+    // own source so its prices materialize as rows; the merge step syncs them.
+    type Job = { label: string; run: () => Promise<{ rows: CatalogRow[]; sources?: SourceStatus[] }> }
+    const jobs: Job[] = []
     files.forEach((f) =>
       jobs.push({
         label: f.name,
-        build: () => {
-          const fd = new FormData()
-          fd.append('files', f)
-          return fd
+        run: async () => {
+          setUploadingLabel(f.name)
+          const sp = await uploadToStorage(f)
+          setUploadingLabel(null)
+          return callExtract({ storagePaths: [sp] })
         },
       })
     )
-    if (hasUrls) {
-      jobs.push({
-        label: 'אתרים',
-        build: () => {
-          const fd = new FormData()
-          fd.append('urls', urls.trim())
-          return fd
-        },
-      })
-    }
-    // Always extract the pasted text as its own source, so the prices it holds
-    // (participant tiers, bar minimum, travel cost…) materialize as real rows.
-    // They then survive even if the merge step is slow/unavailable.
-    if (hasText) {
-      jobs.push({
-        label: 'טקסט שהודבק',
-        build: () => {
-          const fd = new FormData()
-          fd.append('text', text.trim())
-          return fd
-        },
-      })
-    }
+    if (hasUrls) jobs.push({ label: 'אתרים', run: () => callExtract({ urls: urls.trim() }) })
+    if (hasText) jobs.push({ label: 'טקסט שהודבק', run: () => callExtract({ text: text.trim() }) })
 
     const acc: CatalogRow[] = []
     const stat: SourceStatus[] = []
     for (const job of jobs) {
       try {
-        const res = await fetch('/api/admin/extract', { method: 'POST', body: job.build() })
-        const json = await res.json().catch(() => ({}))
-        if (!res.ok) {
-          stat.push({ label: job.label, status: 'error', rows: 0, error: json.error || `שגיאה ${res.status}` })
-        } else {
-          const r: CatalogRow[] = Array.isArray(json.rows) ? json.rows : []
-          acc.push(...r)
-          if (Array.isArray(json.sources) && json.sources.length) stat.push(...json.sources)
-          else stat.push({ label: job.label, status: 'done', rows: r.length, error: null })
-        }
+        const { rows: r, sources: srcs } = await job.run()
+        acc.push(...r)
+        if (srcs && srcs.length) stat.push(...srcs)
+        else stat.push({ label: job.label, status: 'done', rows: r.length, error: null })
       } catch (e) {
+        setUploadingLabel(null)
         stat.push({ label: job.label, status: 'error', rows: 0, error: e instanceof Error ? e.message : 'שגיאת רשת' })
       }
       setSources([...stat])
@@ -288,6 +300,7 @@ export default function ExtractPage() {
     setSources([])
     setStats(null)
     setErrorMsg('')
+    setUploadingLabel(null)
     setPhase('idle')
   }
 
@@ -461,9 +474,13 @@ export default function ExtractPage() {
               <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
                 <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
                 <div>
-                  <p className="font-medium text-blue-900">מחלץ נתונים — כל מקור בתורו…</p>
+                  <p className="font-medium text-blue-900">
+                    {uploadingLabel ? `מעלה קובץ: ${uploadingLabel}…` : 'מחלץ נתונים — כל מקור בתורו…'}
+                  </p>
                   <p className="mt-1 text-xs text-blue-600">
-                    כל קובץ/מקור מעובד בנפרד כדי לשמור על יציבות. אל תסגרו את החלון.
+                    {uploadingLabel
+                      ? 'מעלה את הקובץ לאחסון מאובטח (תומך גם בקבצים גדולים). אל תסגרו את החלון.'
+                      : 'כל קובץ/מקור מעובד בנפרד כדי לשמור על יציבות. אל תסגרו את החלון.'}
                   </p>
                 </div>
               </div>
