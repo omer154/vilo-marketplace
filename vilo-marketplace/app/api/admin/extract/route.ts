@@ -24,6 +24,34 @@ interface SourceStatus {
   error: string | null
 }
 
+/** Drop exact-duplicate rows (same supplier + service + price + capacity) — e.g.
+ *  a service that straddled two text chunks and got extracted twice, or appears
+ *  in more than one source. Distinct pricing tiers stay (price is in the key). */
+function dedupeRows(rows: CatalogRow[]): CatalogRow[] {
+  const norm = (s: string | null) =>
+    (s ?? '').normalize('NFKC').replace(/[֑-ׇ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+  const seen = new Set<string>()
+  const out: CatalogRow[] = []
+  for (const r of rows) {
+    // Rows with no name at all have no identity to dedupe on — keep them.
+    if (!norm(r.service_name) && !norm(r.supplier_name)) {
+      out.push(r)
+      continue
+    }
+    const key = [
+      norm(r.supplier_name),
+      norm(r.service_name),
+      r.price_ils ?? '',
+      r.capacity_min ?? '',
+      r.capacity_max ?? '',
+    ].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
+}
+
 /** Bounded-concurrency map (index order preserved). */
 async function pMap<T, R>(
   items: T[],
@@ -199,7 +227,7 @@ export async function POST(request: NextRequest) {
   )
 
   for (const r of results) statuses.push(r.status)
-  const rows = results.flatMap((r) => r.rows)
+  const rows = dedupeRows(results.flatMap((r) => r.rows))
 
   return NextResponse.json({ rows, sources: statuses, total: rows.length })
   } catch (err) {
