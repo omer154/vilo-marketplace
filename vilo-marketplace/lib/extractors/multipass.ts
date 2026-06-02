@@ -30,7 +30,9 @@ import type { CatalogRow, ConfidenceScore } from './types'
 import { CATALOG_COLUMNS } from './types'
 
 const EXTRACT_MODEL = 'claude-haiku-4-5'
-const RECONCILE_MODEL = 'claude-sonnet-4-6'
+// Haiku, not Sonnet: this tier throttles/overloads Sonnet, and a reconcile
+// failure used to kill the whole PDF. Header-mapping is easy enough for Haiku.
+const RECONCILE_MODEL = 'claude-haiku-4-5'
 const WINDOW_SIZE = 3
 const WINDOW_OVERLAP = 1
 const WINDOW_CONCURRENCY = 3
@@ -399,7 +401,9 @@ async function reconcileSections(
 
   console.log(`[reconcile] mapping ${unique.length} distinct observed headers`)
 
-  const response = await withRateLimitRetry(
+  let response: Anthropic.Message
+  try {
+    response = await withRateLimitRetry(
     () =>
       client.messages.create({
         model: RECONCILE_MODEL,
@@ -436,6 +440,12 @@ async function reconcileSections(
       }),
     'reconcile'
   )
+  } catch (err) {
+    console.warn(
+      `[reconcile] call failed (${err instanceof Error ? err.message : err}) — using identity mapping`
+    )
+    return Object.fromEntries(unique.map((h) => [h, h]))
+  }
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {

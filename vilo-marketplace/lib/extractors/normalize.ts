@@ -285,19 +285,19 @@ async function normalizeOne(
 
   const toolUse = response.content.find((c) => c.type === 'tool_use')
   if (!toolUse || toolUse.type !== 'tool_use') {
-    throw new Error(
-      `Claude returned no structured output. stop_reason=${response.stop_reason}. ` +
-        (response.stop_reason === 'max_tokens'
-          ? 'הקובץ גדול מדי לחילוץ במהלך אחד. נסה לפצל אותו לקובץ קטן יותר (לדוגמה, ספק אחד בכל קובץ).'
-          : 'נסה שוב.')
+    // Degrade gracefully — never hard-fail the whole source. Usually max_tokens
+    // on one dense call; the windowed/chunked paths avoid it. Logged for diagnosis.
+    console.warn(
+      `[normalizeOne] no structured output (stop_reason=${response.stop_reason}); returning 0 rows for this call.`
     )
+    return []
   }
   const input = toolUse.input as { rows?: CatalogRow[] }
   if (!Array.isArray(input.rows)) {
-    throw new Error(
-      `התשובה מקלוד הייתה ריקה. stop_reason=${response.stop_reason}. ` +
-        'סביר להניח שהמסמך גדול מדי — פצל אותו לקבצים קטנים יותר.'
+    console.warn(
+      `[normalizeOne] tool_use had no rows array (stop_reason=${response.stop_reason}); returning 0 rows.`
     )
+    return []
   }
   return input.rows
 }
