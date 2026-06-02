@@ -11,8 +11,10 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 // Above this many rows we skip the AI merge (output would risk max_tokens) and
-// just apply the deterministic supplier-name override.
-const AI_MERGE_ROW_CAP = 120
+// just apply the deterministic supplier-name override. Raised once extraction
+// stopped over-producing rows (topic-list explosion fixed) so real catalogs now
+// land well under it and DO get merged/price-synced.
+const AI_MERGE_ROW_CAP = 160
 
 const CATEGORY_VALUES = [
   'wellbeing',
@@ -76,6 +78,8 @@ const SYSTEM_PROMPT = `אתה מאחד ומסנכרן קטלוג שירותים 
 - שירותים שמופיעים רק בטקסט (לדוגמה "בר לאירועים" עם מינימום מחיר/כמות) — צור עבורם שורה אם אינם קיימים כבר.
 - אל תזרוק מידע מחיר: הערות כמו כולל/לא כולל מע"מ, עלות הגעה/נסיעות, תוספות, מקדמה ואזורי שירות — שמור ב-supplier_notes או ב-service_description של השורה הרלוונטית.
 - פריטים בודדים מתוך תפריט/רשימה (מנות, קוקטיילים, פריטי מוצר וכו') שאין להם מחיר עצמאי — חובה לסכם אותם לתוך ה-service_description של השירות הרלוונטי (לדוגמה רשימת הקוקטיילים נכנסת לתיאור הסדנה/הבר). אל תחזיר אותם כשורות שירות נפרדות.
+- "נושאים אופציונליים" / רשימת נושאים / מודולים לבחירה אינם שירותים — מזג אותם לתוך ה-service_description של השירות שאליו הם שייכים, ואל תשאיר אותם כשורות נפרדות.
+- אם אותו שירות מופיע גם כשורה חסרת-מחיר וגם כשורה עם מחיר (כי המחיר חולץ מטבלת מחירים נפרדת) — מזג לשורה אחת עם המחיר. אל תשאיר את השורה חסרת-המחיר ככפילות.
 - אחֵד כפילויות אמיתיות; שמור שירותים ומדרגות תמחור שונים באמת.
 - supplier_category: תן ערך עקבי לשירותים מאותו סוג של אותו ספק (לדוגמה כל מדרגות הסדנה תחת אותה קטגוריה). אל תמציא קטגוריות חדשות.
 - שמור טקסט בעברית verbatim. אל תמציא נתונים שאינם במקור. החזר את כל השירותים.`

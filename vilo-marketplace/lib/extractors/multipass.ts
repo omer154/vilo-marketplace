@@ -33,15 +33,22 @@ const EXTRACT_MODEL = 'claude-haiku-4-5'
 // Haiku, not Sonnet: this tier throttles/overloads Sonnet, and a reconcile
 // failure used to kill the whole PDF. Header-mapping is easy enough for Haiku.
 const RECONCILE_MODEL = 'claude-haiku-4-5'
-const WINDOW_SIZE = 3
+// Larger windows (6 pages, 1 overlap) keep a service and its pricing table in
+// the same window far more often than 3-page windows did — less service↔price
+// fragmentation — and produce ~10 windows for a 50-page doc instead of 25, which
+// also eases per-minute rate limits. Only dense PDFs that overflow the single
+// holistic pass reach this path, so the bigger per-call payload is acceptable.
+const WINDOW_SIZE = 6
 const WINDOW_OVERLAP = 1
 const WINDOW_CONCURRENCY = 5
-const WINDOW_MAX_TOKENS = 8_000
+const WINDOW_MAX_TOKENS = 12_000
 const RECONCILE_MAX_TOKENS = 1_500
 
 const EXTRACT_SYSTEM = `אתה מחלץ שירותים מתוך חלון של מספר עמודים ממסמך ספק של Vilo Marketplace.
 
 חלץ את כל השירותים שנראים בעמודים שצורפו.
+
+חשוב — מה לא לחלץ: רשימת "נושאים אופציונליים", רשימת נושאים/מודולים לבחירה, או פריטים מתוך תפריט בתוך שירות — אינם שירותים בפני עצמם, ואל תיצור שורה לכל אחד מהם. אם השירות שאליו הם שייכים נראה בחלון — סכם אותם בקצרה ב-service_description שלו; אם לא — דלג עליהם. שירות = הצעה נפרדת שניתן להזמין ולתמחר (סדנה, תוכנית, הרצאה, מפגש, חבילה).
 
 הוראות:
 - כל מדרגת תמחור / וריאציה = שורה נפרדת.

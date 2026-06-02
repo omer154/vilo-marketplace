@@ -1,8 +1,15 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { PDFDocument } from 'pdf-lib'
 import type { CatalogRow, ExtractedSource, ImageMediaType } from './types'
 import { CATALOG_COLUMNS } from './types'
 import { inferSourceSchema, applySchemaToRows } from './schema-mapper'
 import { multipassPdf } from './multipass'
+
+// At/under this page count we try a single holistic pass (full cross-page
+// context). Above it, the one-call output would truncate (the doc has too many
+// services to emit at once) AND it wastes a large PDF-input call before falling
+// back — so big PDFs skip straight to the windowed extractor.
+const HOLISTIC_MAX_PAGES = 30
 
 /**
  * Above this row count, structured sources (Excel/CSV) take the fast path:
@@ -25,12 +32,19 @@ const CATEGORY_VALUES = [
 
 const SYSTEM_PROMPT = `אתה עוזר חילוץ נתונים של פלטפורמת Vilo Marketplace.
 המשתמש העלה קובץ או הזין תוכן שמתאר שירותים של ספק/ספקים.
-המשימה שלך: לחלץ שורות מובנות לקטלוג, אחת לכל שירות (וכל מדרגת תמחור — מספר ספציפי של משתתפים — נחשבת שורה נפרדת).
+המשימה שלך: לחלץ שורות מובנות לקטלוג, אחת לכל שירות (וכל מדרגת תמחור — מספר משתתפים, משך זמן, או מספר מפגשים — נחשבת שורה נפרדת).
+
+מה נחשב שירות ומה לא — חשוב מאוד, קרא בעיון:
+- שירות = הצעה נפרדת שניתן להזמין ולתמחר (סדנה, תוכנית ליווי, הרצאה, מפגש, חבילה, מוצר).
+- רשימת "נושאים אופציונליים", רשימת נושאים/מודולים לבחירה, פריטים מתוך תפריט, או תתי-נושאים בתוך שירות — אלה אינם שירותים בפני עצמם. אל תיצור להם שורות נפרדות. סכם אותם בתוך ה-service_description של השירות שאליו הם שייכים (לדוגמה: "נושאים לבחירה: תקשורת בינאישית, ניהול קונפליקטים, קבלת החלטות..."). יצירת שורה לכל נושא ברשימה היא טעות חמורה.
+- חיבור מחירים לשירות: טבלת מחירים מופיעה לעיתים בעמוד/חלק נפרד מתיאור השירות. חבר כל מחיר לשירות הנכון לפי שם השירות שמופיע בטבלה או בכותרת מעליה. כל שילוב של משך זמן / מספר מפגשים / מספר משתתפים עם מחיר = שורה נפרדת עם אותו שם שירות (עם duration_hours / capacity_min/max / price_ils מתאימים). דוגמה: "תכנית ליווי קבוצתית — 5 מפגשים × 3 שעות — 21,500₪" ו-"5 מפגשים × 2 שעות — 19,000₪" = שתי שורות לאותו שירות, עם duration_hours=3 ו-duration_hours=2.
+- אל תשאיר שירות ללא מחיר אם המחיר קיים במסמך (גם אם בעמוד אחר). ואל תיצור גם שורה חסרת-מחיר וגם שורה עם-מחיר לאותו שירות — רק את השורה/שורות עם המחיר.
 
 הנחיות:
 - אם נתון חסר — לפני שתחזיר null, סרוק את המקור שלוש פעמים: (1) חפש ערך מפורש ומתויג; (2) חפש מילים נרדפות וראשי תיבות (משך≈זמן פעילות, עלות/עלות≈מחיר, "עד X איש"≈כמות); (3) הסק מההקשר (כותרות, שורות סמוכות, טבלאות). רק אם אחרי שלוש הסריקות הנתון באמת לא קיים — החזר null. null הוא מוצא אחרון, לא ברירת מחדל. לעולם אל תמציא.
 - supplier_category חייב להיות אחד מ: ${CATEGORY_VALUES.join(', ')}. נסה לבחור את המתאים ביותר; אם באמת אין התאמה, החזר null.
 - price_type: 'fixed' אם יש מחיר בודד, 'range' אם יש טווח (price_min ו-price_max), 'on_request' אם לא מצוין מחיר ספציפי.
+- pricing_unit (חובה כשיש מחיר) — בחר אך ורק אחד מהערכים הבאים, אל תכתוב מילה אחרת: person (המחיר לאדם/למשתתף), group (המחיר לקבוצה / למפגש / לפעילות שלמה), hour (המחיר לשעה), project (המחיר לתוכנית / סדרה / חבילה שלמה), month (חודשי), unit (ליחידה / מוצר). מיפוי: "סדרה"/"תוכנית"/"חבילה" → project ; "מפגש"/"סדנה"/"יום הדרכה" במחיר אחד לקבוצה → group ; מחיר לאדם → person.
 - location_mode: 'at_provider' = במתחם של הספק (קליניקה / סטודיו), 'at_client' = במשרד / במתחם של הלקוח, 'remote' = מקוון, 'hybrid' = שתי האפשרויות אפשריות. בחר את המתאים ביותר.
 - duration_hours: בשעות (לדוגמה 1.5 לשעה וחצי).
 - אם השירות מציע כמה מדרגות תמחור (לדוגמה: עד 20 איש 1000 ש"ח, 21-40 איש 1500 ש"ח), צור שורה נפרדת לכל מדרגה עם capacity_min/max ו-price_ils מתאימים.
@@ -319,6 +333,74 @@ function applySupplierHint(rows: CatalogRow[], source: ExtractedSource): Catalog
   )
 }
 
+/**
+ * One holistic Haiku call over the WHOLE PDF (sent as a native document block).
+ * Unlike the windowed extractor it sees the entire document at once, so pricing
+ * tables attach to the service they price and "optional topics" lists collapse
+ * into the description instead of exploding into one row each. Returns the rows
+ * plus whether the model truncated (max_tokens); the caller falls back to
+ * windowing only when the doc is too dense to fit a single response.
+ */
+async function extractPdfHolistic(
+  client: Anthropic,
+  source: ExtractedSource
+): Promise<{ rows: CatalogRow[]; truncated: boolean }> {
+  if (!source.pdf_buffer) return { rows: [], truncated: false }
+  type Content =
+    | { type: 'text'; text: string }
+    | { type: 'document'; source: { type: 'base64'; media_type: 'application/pdf'; data: string } }
+  const content: Content[] = [
+    {
+      type: 'document',
+      source: {
+        type: 'base64',
+        media_type: 'application/pdf',
+        data: source.pdf_buffer.toString('base64'),
+      },
+    },
+    {
+      type: 'text',
+      text:
+        `מקור: ${source.source_label}\n\nקרא את כל ה-PDF המצורף וחלץ ממנו את כל השירותים האמיתיים.\n` +
+        `זכור: רשימת "נושאים אופציונליים" / מודולים / נושאים לבחירה אינה שירותים — סכם אותה ב-service_description, אל תיצור שורה לכל נושא. ` +
+        `חבר כל טבלת מחירים לשירות הנכון (גם אם היא בעמוד אחר); כל מדרגת משך/כמות/מחיר = שורה נפרדת לאותו שירות. שמור על העברית כפי שהיא.`,
+    },
+  ]
+  if (source.supplementary_text) {
+    content.push({
+      type: 'text',
+      text: `מידע נוסף מהמשתמש (שלב אותו, במיוחד מחירים):\n${source.supplementary_text.slice(0, 20_000)}`,
+    })
+  }
+
+  const response = await withRateLimitRetry(() =>
+    client.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 16_000,
+      system: SYSTEM_PROMPT,
+      tools: [
+        {
+          name: 'submit_catalog_rows',
+          description: 'Submit the extracted catalog rows. One row per service, per pricing tier.',
+          input_schema: TOOL_INPUT_SCHEMA,
+        },
+      ],
+      tool_choice: { type: 'tool', name: 'submit_catalog_rows' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      messages: [{ role: 'user', content: content as any }],
+    })
+  )
+
+  const truncated = response.stop_reason === 'max_tokens'
+  const toolUse = response.content.find((c) => c.type === 'tool_use')
+  const input = (toolUse && toolUse.type === 'tool_use' ? toolUse.input : {}) as { rows?: CatalogRow[] }
+  const rows = Array.isArray(input.rows) ? input.rows : []
+  console.log(
+    `[holistic] "${source.source_label}" stop=${response.stop_reason} rows=${rows.length}${truncated ? ' (TRUNCATED)' : ''}`
+  )
+  return { rows, truncated }
+}
+
 export async function normalizeWithClaude(
   source: ExtractedSource
 ): Promise<CatalogRow[]> {
@@ -330,20 +412,38 @@ export async function normalizeWithClaude(
   let rows: CatalogRow[]
 
   if (source.pdf_buffer) {
-    // Multipass for PDFs — outline scan + per-service expansion, ~1-2K
-    // tokens output per call. Sidesteps both max_tokens truncation and
-    // per-minute rate limits on messy docs (10+ pages, many pricing tiers).
+    // Count pages cheaply to pick the strategy.
+    let pageCount = 0
     try {
-      rows = await multipassPdf(client, source.pdf_buffer, source.source_label)
+      pageCount = (await PDFDocument.load(source.pdf_buffer)).getPageCount()
     } catch {
-      rows = []
+      pageCount = 0
     }
-    if (rows.length === 0) {
-      // The outline scan found no "services" — e.g. a pure pricing-table PDF
-      // (tiers by participant count, with no service descriptions). Fall back to
-      // a single full-PDF extraction so the price tiers still come through; the
-      // consolidate step then attaches them to the matching service.
-      rows = await normalizeOne(client, source)
+
+    // Small/medium PDF → one holistic pass preserves cross-page context (a
+    // pricing table on page 8 attaches to its service on page 2; "optional
+    // topics" fold into the description instead of becoming rows). A big PDF
+    // would truncate that single response, so it skips straight to windowing.
+    let holistic = { rows: [] as CatalogRow[], truncated: false }
+    if (pageCount === 0 || pageCount <= HOLISTIC_MAX_PAGES) {
+      holistic = await extractPdfHolistic(client, source).catch(() => ({
+        rows: [] as CatalogRow[],
+        truncated: true,
+      }))
+    }
+
+    if (holistic.rows.length > 0 && !holistic.truncated) {
+      rows = holistic.rows
+    } else {
+      // Dense/large doc → windowed extraction for throughput; the route's
+      // consolidate step then stitches prices onto services and folds topics.
+      let windowed: CatalogRow[] = []
+      try {
+        windowed = await multipassPdf(client, source.pdf_buffer, source.source_label)
+      } catch {
+        windowed = []
+      }
+      rows = windowed.length >= holistic.rows.length ? windowed : holistic.rows
     }
   } else if (source.image_buffer) {
     // Photo/scan → single Haiku vision call.
