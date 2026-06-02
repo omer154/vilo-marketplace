@@ -334,6 +334,76 @@ function applySupplierHint(rows: CatalogRow[], source: ExtractedSource): Catalog
 }
 
 /**
+ * Format-priced catalogs: some suppliers price every topic the SAME way — by
+ * session length, not per topic (e.g. ANY 1.5h session ₪3,150 / 3h workshop
+ * ₪4,320 / full day ₪6,300). They list the topics in one place and a single
+ * format-price table elsewhere, so extraction yields many PRICELESS topic rows
+ * plus a few generic priced "tier" rows (one per duration). The model can't
+ * reliably emit the full topic×format cross-product (it truncates), so we do it
+ * deterministically here: each topic becomes one priced row per format tier, so
+ * every topic is individually bookable and filterable by budget + duration.
+ *
+ * Runs PER SOURCE (one PDF) so one catalog's tiers never leak onto another's
+ * topics. Triggers only on the clear pattern, leaving normal per-service
+ * catalogs (where rows already carry their own price) untouched.
+ */
+export function applyFormatPricing(rows: CatalogRow[]): CatalogRow[] {
+  const priceless = rows.filter(
+    (r) => r.price_ils == null && r.price_min == null && !!r.service_name?.trim()
+  )
+  const pricedWithDur = rows.filter((r) => r.price_ils != null && r.duration_hours != null)
+
+  // One tier per distinct duration (cheapest price for that duration) → ~3 tiers.
+  const byDur = new Map<number, CatalogRow>()
+  for (const r of pricedWithDur) {
+    const d = r.duration_hours as number
+    const cur = byDur.get(d)
+    if (!cur || (r.price_ils as number) < (cur.price_ils as number)) byDur.set(d, r)
+  }
+  const tiers = [...byDur.values()].sort(
+    (a, b) => (a.duration_hours as number) - (b.duration_hours as number)
+  )
+
+  // Specific trigger: a real topic menu (many priceless) + a small by-duration
+  // price scheme, with clearly more topics than tiers. Otherwise leave as-is.
+  if (
+    priceless.length < 6 ||
+    tiers.length < 2 ||
+    tiers.length > 5 ||
+    priceless.length < 2 * tiers.length
+  ) {
+    return rows
+  }
+
+  // Everything that is neither a priceless topic nor a by-duration tier row
+  // passes through untouched (the tiers are absorbed into every topic).
+  const pricelessSet = new Set(priceless)
+  const tierSet = new Set(pricedWithDur)
+  const passthrough = rows.filter((r) => !pricelessSet.has(r) && !tierSet.has(r))
+
+  const expanded: CatalogRow[] = []
+  for (const topic of priceless) {
+    for (const tier of tiers) {
+      expanded.push({
+        ...topic,
+        price_ils: tier.price_ils,
+        price_type: 'fixed',
+        price_min: null,
+        price_max: null,
+        pricing_unit: tier.pricing_unit ?? 'group',
+        duration_hours: tier.duration_hours,
+        capacity_min: topic.capacity_min ?? tier.capacity_min,
+        capacity_max: topic.capacity_max ?? tier.capacity_max,
+      })
+    }
+  }
+  console.log(
+    `[format-pricing] ${priceless.length} topics × ${tiers.length} tiers → ${expanded.length} priced rows`
+  )
+  return [...passthrough, ...expanded]
+}
+
+/**
  * One holistic Haiku call over the WHOLE PDF (sent as a native document block).
  * Unlike the windowed extractor it sees the entire document at once, so pricing
  * tables attach to the service they price and "optional topics" lists collapse
@@ -482,5 +552,5 @@ export async function normalizeWithClaude(
     rows = await normalizeOne(client, source, source.rows)
   }
 
-  return applySupplierHint(rows, source)
+  return applySupplierHint(applyFormatPricing(rows), source)
 }
