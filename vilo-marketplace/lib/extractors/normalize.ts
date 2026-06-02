@@ -49,6 +49,28 @@ const CHUNK_SIZE = 25
 // the route's maxDuration.
 const MAX_CONCURRENCY = 5
 
+// A scraped page / long document can describe MANY services (e.g. a directory of
+// 50 escape rooms). Extracting them all in one call blows past max_tokens, so
+// split long raw text into chunks and extract each — keeping every call small.
+const RAW_TEXT_CHUNK_THRESHOLD = 12_000
+const RAW_TEXT_CHUNK_SIZE = 8_000
+
+/** Split text into ~maxLen-char chunks, breaking on a space near the boundary. */
+function chunkText(text: string, maxLen: number): string[] {
+  const chunks: string[] = []
+  let i = 0
+  while (i < text.length) {
+    let end = Math.min(i + maxLen, text.length)
+    if (end < text.length) {
+      const sp = text.lastIndexOf(' ', end)
+      if (sp > i + maxLen * 0.6) end = sp
+    }
+    chunks.push(text.slice(i, end))
+    i = end
+  }
+  return chunks
+}
+
 /** Run `fn` over `items` with bounded concurrency. Preserves index order. */
 async function pMap<T, R>(
   items: T[],
@@ -135,7 +157,8 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
 async function normalizeOne(
   client: Anthropic,
   source: ExtractedSource,
-  rowsChunk?: Record<string, unknown>[]
+  rowsChunk?: Record<string, unknown>[],
+  textChunk?: string
 ): Promise<CatalogRow[]> {
   // Build content blocks. For PDFs we send the raw buffer as a `document`
   // block — Claude reads it natively (text, tables, images). For
@@ -191,6 +214,11 @@ async function normalizeOne(
       text:
         `${header}\n\nשורות מובנות מהמקור (${rowsChunk.length} שורות):\n` +
         JSON.stringify(rowsChunk, null, 2),
+    })
+  } else if (textChunk) {
+    messageContent.push({
+      type: 'text',
+      text: `${header}\n\nתוכן (קטע מתוך אתר/מסמך):\n${textChunk}`,
     })
   } else if (source.raw_text) {
     messageContent.push({
@@ -319,6 +347,14 @@ export async function normalizeWithClaude(
     }
     const results = await pMap(chunks, MAX_CONCURRENCY, (chunk) =>
       normalizeOne(client, source, chunk)
+    )
+    rows = results.flat()
+  } else if (source.raw_text && source.raw_text.length > RAW_TEXT_CHUNK_THRESHOLD) {
+    // Long scraped text (a directory page, a big document) → chunk + parallelize
+    // so each call stays well under max_tokens.
+    const chunks = chunkText(source.raw_text, RAW_TEXT_CHUNK_SIZE)
+    const results = await pMap(chunks, MAX_CONCURRENCY, (chunk) =>
+      normalizeOne(client, source, undefined, chunk)
     )
     rows = results.flat()
   } else {
