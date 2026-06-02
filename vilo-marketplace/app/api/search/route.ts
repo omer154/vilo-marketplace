@@ -2,6 +2,33 @@ import { createClient } from '@supabase/supabase-js'
 
 const MIN_RESULTS_THRESHOLD = 3
 
+/**
+ * Attach each result's owning-supplier cancellation-terms link so the service
+ * detail view can show it. Resilient: if the column doesn't exist yet (the
+ * migration hasn't been applied) the select errors and we return the results
+ * unchanged — search keeps working, the feature is just inert until then.
+ */
+async function withSupplierTerms(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  results: Array<Record<string, unknown>>
+): Promise<Array<Record<string, unknown>>> {
+  if (!Array.isArray(results) || results.length === 0) return results
+  const ids = [...new Set(results.map((r) => r.supplier_id).filter(Boolean))] as string[]
+  if (ids.length === 0) return results
+  const { data, error } = await supabase
+    .from('suppliers')
+    .select('id, cancellation_terms_url')
+    .in('id', ids)
+  if (error || !data) return results
+  const rows = data as unknown as Array<{ id: string; cancellation_terms_url: string | null }>
+  const map = new Map(rows.map((s) => [s.id, s.cancellation_terms_url ?? null]))
+  return results.map((r) => ({
+    ...r,
+    supplier_cancellation_terms_url: map.get(r.supplier_id as string) ?? null,
+  }))
+}
+
 export async function POST(req: Request) {
   try {
     const {
@@ -111,7 +138,7 @@ export async function POST(req: Request) {
     //   selected pills.  When there's no text query (just category
     //   browse), we skip Pass 2 — would just return random rows.
     if (!hasTextQuery) {
-      return Response.json({ results: strictResults, relaxed: false })
+      return Response.json({ results: await withSupplierTerms(supabase, strictResults), relaxed: false })
     }
 
     const { data: relaxedData, error: relaxedError } = await supabase.rpc('search_services', {
@@ -125,7 +152,7 @@ export async function POST(req: Request) {
     })
 
     if (relaxedError) {
-      return Response.json({ results: strictResults, relaxed: false })
+      return Response.json({ results: await withSupplierTerms(supabase, strictResults), relaxed: false })
     }
 
     const relaxedResults = relaxedData || []
@@ -147,7 +174,7 @@ export async function POST(req: Request) {
 
     const relaxed = merged.length > strictResults.length
     return Response.json({
-      results: merged,
+      results: await withSupplierTerms(supabase, merged),
       relaxed,
       strictCount: strictResults.length,
     })

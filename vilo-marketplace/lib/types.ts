@@ -21,6 +21,9 @@ export interface Supplier {
   website?: string | null
   contact_email: string | null
   description_short: string | null
+  /** Optional link to the supplier's cancellation & order-change terms
+   *  ("תנאי ביטול ושינוי הזמנה"), shown on the supplier and every service. */
+  cancellation_terms_url?: string | null
   is_active: boolean
   services?: Service[]
 }
@@ -30,6 +33,9 @@ export interface Service {
   supplier_id: string
   supplier_name?: string
   supplier_logo_url?: string | null
+  /** The owning supplier's cancellation-terms link, joined onto the service so
+   *  the detail view can show it. Populated on the supplier page + in search. */
+  supplier_cancellation_terms_url?: string | null
   service_name: string
   category_primary: CategorySlug
   category_secondary: string | null

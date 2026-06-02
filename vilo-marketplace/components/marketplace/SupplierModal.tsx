@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Clock, Users, Coins, MapPin, Pencil, Building2, ArrowLeft } from 'lucide-react'
+import { X, Clock, Users, Coins, MapPin, Pencil, Building2, ArrowLeft, FileText } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import {
   Heart,
@@ -67,6 +67,10 @@ const LOCATION_HE: Record<string, string> = {
   at_provider: 'אצל הספק',
   hybrid: 'גמיש — אצלכם או אצל הספק',
 }
+
+/** Make a pasted link safe to use as an absolute href (prepend https:// when
+ *  the admin pasted a bare "www.x.com/terms" without a scheme). */
+const externalHref = (u: string) => (/^https?:\/\//i.test(u) ? u : `https://${u}`)
 
 interface SupplierModalProps {
   service: Service
@@ -298,6 +302,20 @@ export default function SupplierModal({ service, onClose }: SupplierModalProps) 
             <div className="bg-amber-50 rounded-lg p-4 mb-6">
               <p className="text-sm text-amber-800">{service.notes}</p>
             </div>
+          )}
+
+          {/* Supplier-level cancellation & order-change terms (set by admin on
+              the supplier; shown on every one of the supplier's services). */}
+          {service.supplier_cancellation_terms_url && (
+            <a
+              href={externalHref(service.supplier_cancellation_terms_url)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mb-6 inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 underline-offset-2 hover:underline"
+            >
+              <FileText className="h-4 w-4" />
+              תנאי ביטול ושינוי הזמנה
+            </a>
           )}
 
           {/* CTAs */}

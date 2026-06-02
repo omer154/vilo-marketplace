@@ -17,6 +17,7 @@ import {
   Loader2,
   Sparkles,
   Camera,
+  FileText,
 } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import AdminProbe from '@/components/layout/AdminProbe'
@@ -37,6 +38,9 @@ import {
   completeness,
 } from '@/lib/ui-meta'
 import EditableGrid, { type GridCol } from '@/components/admin/EditableGrid'
+
+/** Prepend https:// to a bare pasted link so it works as an absolute href. */
+const externalHref = (u: string) => (/^https?:\/\//i.test(u) ? u : `https://${u}`)
 
 // Columns for the admin services table (drag-fill bulk editing).
 const SERVICE_COLS: GridCol[] = [
@@ -498,6 +502,32 @@ export default function SupplierProfile({
                     <InlineField endpoint={supEp} field="contact_email" value={supplier.contact_email} emptyLabel={isAdmin ? 'הוסף אימייל' : undefined} />
                   </span>
                 )}
+                {/* Cancellation & order-change terms — set by admin, shown to all
+                    on the header and on every service. */}
+                {(supplier.cancellation_terms_url || isAdmin) && (
+                  <span className="inline-flex items-center gap-1.5">
+                    <FileText className="h-4 w-4 text-gray-400" />
+                    {isAdmin ? (
+                      <InlineField
+                        endpoint={supEp}
+                        field="cancellation_terms_url"
+                        value={supplier.cancellation_terms_url ?? null}
+                        emptyLabel="צרף קישור לתנאי ביטול ושינוי הזמנה"
+                        className="text-gray-600"
+                        ariaLabel="תנאי ביטול ושינוי הזמנה"
+                      />
+                    ) : (
+                      <a
+                        href={externalHref(supplier.cancellation_terms_url ?? '')}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-brand-600 underline-offset-2 hover:underline"
+                      >
+                        תנאי ביטול ושינוי הזמנה
+                      </a>
+                    )}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -563,7 +593,12 @@ export default function SupplierProfile({
 
       {selected && (
         <SupplierModal
-          service={{ ...selected, supplier_name: supplier.name, supplier_logo_url: supplier.logo_url }}
+          service={{
+            ...selected,
+            supplier_name: supplier.name,
+            supplier_logo_url: supplier.logo_url,
+            supplier_cancellation_terms_url: supplier.cancellation_terms_url ?? null,
+          }}
           onClose={() => setSelected(null)}
         />
       )}

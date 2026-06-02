@@ -41,6 +41,7 @@ export async function PATCH(
     'contact_email',
     'description_short',
     'logo_url',
+    'cancellation_terms_url',
   ])
   const update: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(body)) {
