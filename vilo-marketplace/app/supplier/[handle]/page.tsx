@@ -39,11 +39,22 @@ export async function generateMetadata({
 
 export default async function SupplierProfilePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ handle: string }>
+  searchParams: Promise<{ edit?: string }>
 }) {
   const { handle } = await params
+  const { edit } = await searchParams
   const data = await load(handle)
   if (!data) notFound()
-  return <SupplierProfile supplier={data.supplier} services={data.services} />
+  // Editing is enabled only via explicit intent (?edit=1, added by the admin
+  // "ערוך בעמוד" link). Plain marketplace links omit it → read-only for everyone.
+  return (
+    <SupplierProfile
+      supplier={data.supplier}
+      services={data.services}
+      editable={edit === '1'}
+    />
+  )
 }

@@ -248,6 +248,17 @@ async function upsertOneRow(
     row.supplier_category == null || row.supplier_category === ''
       ? lookup.is('category_secondary', null)
       : lookup.eq('category_secondary', row.supplier_category)
+  // Pricing tiers of the SAME service differ only by duration and/or price
+  // (e.g. a topic offered as a 1.5h session / 3h workshop / full day). Without
+  // these in the match key, all tiers collapse onto one row (each overwrites the
+  // last) — so N priced tiers imported as 1 service. Include both so every tier
+  // becomes its own service.
+  lookup =
+    durationMinutes == null
+      ? lookup.is('duration_minutes', null)
+      : lookup.eq('duration_minutes', durationMinutes)
+  lookup =
+    row.price_ils == null ? lookup.is('price', null) : lookup.eq('price', row.price_ils)
 
   const { data: existing, error: lookupErr } = await lookup.limit(1).maybeSingle()
   if (lookupErr) return { error: `lookup failed: ${lookupErr.message}` }

@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
 import AdminProbe from '@/components/layout/AdminProbe'
-import InlineField from '@/components/admin/InlineField'
+import InlineField, { InlineEditContext } from '@/components/admin/InlineField'
 import SupplierModal from '@/components/marketplace/SupplierModal'
 import type { CategorySlug, Service, Supplier } from '@/lib/types'
 import {
@@ -258,8 +258,9 @@ function StatChip({ icon: Icon, children }: { icon: React.ComponentType<{ classN
   )
 }
 
-function ServiceCard({ service, onOpen }: { service: Service; onOpen: () => void }) {
-  const isAdmin = useMarketplaceStore((s) => s.isAdmin)
+function ServiceCard({ service, onOpen, editable }: { service: Service; onOpen: () => void; editable: boolean }) {
+  // `editable` already folds in admin + edit-intent; the body gates on it.
+  const isAdmin = editable
   const ep = `/api/admin/services/${service.id}`
   const cat = CATEGORY_META[service.category_primary]
   const CatIcon = cat ? CATEGORY_ICON_MAP[cat.icon] : null
@@ -376,8 +377,22 @@ function ServiceCard({ service, onOpen }: { service: Service; onOpen: () => void
   )
 }
 
-export default function SupplierProfile({ supplier, services }: { supplier: Supplier; services: Service[] }) {
-  const isAdmin = useMarketplaceStore((s) => s.isAdmin)
+export default function SupplierProfile({
+  supplier,
+  services,
+  editable = false,
+}: {
+  supplier: Supplier
+  services: Service[]
+  /** Edit-intent from the URL (?edit=1, added only by the admin "ערוך בעמוד"
+   *  link). Plain marketplace browsing passes false → fully read-only. */
+  editable?: boolean
+}) {
+  // Editing requires BOTH a signed-in admin AND explicit edit-intent. So an
+  // admin browsing the public marketplace sees a read-only page; editing is
+  // reached only via the admin area's "ערוך בעמוד". `isAdmin` below therefore
+  // means "edit mode on" — the whole body already gates affordances on it.
+  const isAdmin = useMarketplaceStore((s) => s.isAdmin) && editable
   const supEp = `/api/admin/suppliers/${supplier.id}`
   const [selected, setSelected] = useState<Service | null>(null)
   const [view, setView] = useState<'cards' | 'table'>('cards')
@@ -402,6 +417,7 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
   }
 
   return (
+    <InlineEditContext.Provider value={isAdmin}>
     <div className="min-h-screen bg-slate-50">
       <AdminProbe />
 
@@ -536,7 +552,7 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {svcs.map((s) => (
-                    <ServiceCard key={s.id} service={s} onOpen={() => setSelected(s)} />
+                    <ServiceCard key={s.id} service={s} onOpen={() => setSelected(s)} editable={isAdmin} />
                   ))}
                 </div>
               </section>
@@ -552,5 +568,6 @@ export default function SupplierProfile({ supplier, services }: { supplier: Supp
         />
       )}
     </div>
+    </InlineEditContext.Provider>
   )
 }

@@ -1,8 +1,16 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { Check, Loader2, AlertCircle, Pencil } from 'lucide-react'
 import { useMarketplaceStore } from '@/store/marketplaceStore'
+
+/**
+ * Whether inline editing is enabled in the current subtree. Editing requires
+ * BOTH an admin viewer (the store's isAdmin) AND this being true. Default true
+ * preserves admin-editable behavior; the public marketplace wraps its tree with
+ * `false` so browsing never turns into editing — even for a signed-in admin.
+ */
+export const InlineEditContext = createContext(true)
 
 type FieldType = 'text' | 'textarea' | 'number' | 'select'
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
@@ -56,7 +64,9 @@ export default function InlineField({
   onSaved,
   ariaLabel,
 }: InlineFieldProps) {
+  const editEnabled = useContext(InlineEditContext)
   const isAdmin = useMarketplaceStore((s) => s.isAdmin)
+  const canEdit = isAdmin && editEnabled
   const pushToast = useMarketplaceStore((s) => s.pushToast)
   const [current, setCurrent] = useState<string | number | null>(value)
   const [editing, setEditing] = useState(false)
@@ -77,8 +87,9 @@ export default function InlineField({
     return String(current)
   })()
 
-  // Public (non-admin) view: plain text, or nothing when empty and no emptyLabel.
-  if (!isAdmin) {
+  // Read-only view (non-admin, or editing disabled in this subtree): plain text,
+  // or nothing when empty and no emptyLabel.
+  if (!canEdit) {
     if (isEmpty && !emptyLabel) return null
     return (
       <span className={className}>
