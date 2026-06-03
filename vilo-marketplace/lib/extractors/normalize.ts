@@ -2,7 +2,6 @@ import Anthropic from '@anthropic-ai/sdk'
 import { PDFDocument } from 'pdf-lib'
 import type { CatalogRow, ExtractedSource, ImageMediaType } from './types'
 import { CATALOG_COLUMNS } from './types'
-import { inferSourceSchema, applySchemaToRows } from './schema-mapper'
 import { multipassPdf } from './multipass'
 
 // At/under this page count we try a single holistic pass (full cross-page
@@ -10,13 +9,6 @@ import { multipassPdf } from './multipass'
 // services to emit at once) AND it wastes a large PDF-input call before falling
 // back — so big PDFs skip straight to the windowed extractor.
 const HOLISTIC_MAX_PAGES = 30
-
-/**
- * Above this row count, structured sources (Excel/CSV) take the fast path:
- * one LLM call to infer the column mapping, then pure JS to transform all
- * rows. Below this, the per-row LLM call is faster than two round trips.
- */
-const STRUCTURED_FAST_PATH_THRESHOLD = 10
 
 const CATEGORY_VALUES = [
   'wellbeing',
@@ -44,7 +36,7 @@ const SYSTEM_PROMPT = `אתה עוזר חילוץ נתונים של פלטפור
 - אם נתון חסר — לפני שתחזיר null, סרוק את המקור שלוש פעמים: (1) חפש ערך מפורש ומתויג; (2) חפש מילים נרדפות וראשי תיבות (משך≈זמן פעילות, עלות/עלות≈מחיר, "עד X איש"≈כמות); (3) הסק מההקשר (כותרות, שורות סמוכות, טבלאות). רק אם אחרי שלוש הסריקות הנתון באמת לא קיים — החזר null. null הוא מוצא אחרון, לא ברירת מחדל. לעולם אל תמציא.
 - supplier_category חייב להיות אחד מ: ${CATEGORY_VALUES.join(', ')}. נסה לבחור את המתאים ביותר; אם באמת אין התאמה, החזר null.
 - price_type: 'fixed' אם יש מחיר בודד, 'range' אם יש טווח (price_min ו-price_max), 'on_request' אם לא מצוין מחיר ספציפי.
-- pricing_unit (חובה כשיש מחיר) — בחר אך ורק אחד מהערכים הבאים, אל תכתוב מילה אחרת: person (המחיר לאדם/למשתתף), group (המחיר לקבוצה / למפגש / לפעילות שלמה), hour (המחיר לשעה), project (המחיר לתוכנית / סדרה / חבילה שלמה), month (חודשי), unit (ליחידה / מוצר). מיפוי: "סדרה"/"תוכנית"/"חבילה" → project ; "מפגש"/"סדנה"/"יום הדרכה" במחיר אחד לקבוצה → group ; מחיר לאדם → person.
+- pricing_unit (חובה כשיש מחיר) — בחר אך ורק אחד מהערכים הבאים, אל תכתוב מילה אחרת: person (המחיר לאדם/למשתתף), group (המחיר לקבוצה / למפגש / לפעילות שלמה), hour (המחיר לשעה), project (המחיר לתוכנית / סדרה / חבילה שלמה), month (חודשי), unit (ליחידה / מוצר). מיפוי: "סדרה"/"תוכנית"/"חבילה" → project ; "מפגש"/"סדנה"/"יום הדרכה" במחיר אחד לכל הקבוצה → group ; מחיר לאדם → person. חשוב מאוד: "מחיר לתוצר" / "מחיר לכל משתתף" / "לאדם" — גם אם כתוב לידו "בקבוצה של עד X משתתפים" — הוא pricing_unit=person, ו-capacity_max=X (X הוא גודל הקבוצה המקסימלי, לא יחידת התמחור). רק כשהמחיר הוא לכל הפעילות/הקבוצה כולה (מחיר אחד ללא תלות במספר המשתתפים) → group.
 - location_mode: 'at_provider' = במתחם של הספק (קליניקה / סטודיו), 'at_client' = במשרד / במתחם של הלקוח, 'remote' = מקוון, 'hybrid' = שתי האפשרויות אפשריות. בחר את המתאים ביותר.
 - duration_hours: בשעות (לדוגמה 1.5 לשעה וחצי).
 - אם השירות מציע כמה מדרגות תמחור (לדוגמה: עד 20 איש 1000 ש"ח, 21-40 איש 1500 ש"ח), צור שורה נפרדת לכל מדרגה עם capacity_min/max ו-price_ils מתאימים.
@@ -518,19 +510,11 @@ export async function normalizeWithClaude(
   } else if (source.image_buffer) {
     // Photo/scan → single Haiku vision call.
     rows = await normalizeOne(client, source)
-  } else if (source.rows && source.rows.length >= STRUCTURED_FAST_PATH_THRESHOLD) {
-    // Fast path: structured input with consistent columns. One LLM call to
-    // learn the schema, then pure-JS row transformation.
-    const headers = Object.keys(source.rows[0] ?? {})
-    const schema = await inferSourceSchema(
-      client,
-      headers,
-      source.rows,
-      source.source_label
-    )
-    rows = applySchemaToRows(source.rows, schema)
   } else if (source.rows && source.rows.length > CHUNK_SIZE) {
-    // Slow path: many structured rows → chunk + parallelize.
+    // Structured rows (Excel/CSV) → chunk + parallelize LLM extraction. The LLM
+    // interprets messy/Hebrew columns a deterministic column-map can't: durations
+    // like "שעה וחצי" → 1.5, capacity stated in a header ("בקבוצה של עד 25") → 25,
+    // "מחיר לתוצר" → per-person pricing.
     const chunks: Record<string, unknown>[][] = []
     for (let i = 0; i < source.rows.length; i += CHUNK_SIZE) {
       chunks.push(source.rows.slice(i, i + CHUNK_SIZE))
