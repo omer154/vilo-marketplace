@@ -359,8 +359,14 @@ function upsertKey(row: CatalogRow): string {
 // the DB.
 const IMPORT_CONCURRENCY = 8
 
-/** Import a batch of reviewed catalog rows into suppliers + services. */
-export async function importCatalogRows(rows: CatalogRow[]): Promise<ImportStats> {
+/** Import a batch of reviewed catalog rows into suppliers + services.
+ *  opts.replaceSupplierName: hide that supplier's EXISTING services before
+ *  importing, so a corrected re-import replaces the catalog instead of
+ *  duplicating it (matched rows get reactivated; the rest stay hidden). */
+export async function importCatalogRows(
+  rows: CatalogRow[],
+  opts: { replaceSupplierName?: string | null } = {}
+): Promise<ImportStats> {
   const supabase = getServiceRoleClient()
   const anthropic = new Anthropic({ apiKey: process.env.VILO_ANTHROPIC_KEY })
 
@@ -413,6 +419,26 @@ export async function importCatalogRows(rows: CatalogRow[]): Promise<ImportStats
     if ('error' in result) continue // rows for this supplier fail in the pass below
     supplierCache.set(name, result.id)
     if (result.created) stats.suppliers_created++
+  }
+
+  // Replace mode: hide the targeted supplier's existing services BEFORE inserting
+  // the fresh set, so corrected rows (new name/duration) replace them instead of
+  // duplicating. Only fires for an explicitly-named supplier. The upsert below
+  // reactivates any service whose key still matches; non-matching old rows stay
+  // hidden (is_active=false) — reversible, never hard-deleted.
+  if (opts.replaceSupplierName && opts.replaceSupplierName.trim()) {
+    const targetNorm = normalizeSupplierName(opts.replaceSupplierName)
+    let hidden = 0
+    for (const [name, id] of supplierCache.entries()) {
+      if (normalizeSupplierName(name) !== targetNorm) continue
+      const { error: deErr, count } = await supabase
+        .from('services')
+        .update({ is_active: false }, { count: 'exact' })
+        .eq('supplier_id', id)
+      if (deErr) console.warn(`[import] replace: hide failed for ${id}: ${deErr.message}`)
+      else hidden += count ?? 0
+    }
+    console.log(`[import] replace mode: hid ${hidden} existing services for "${opts.replaceSupplierName}"`)
   }
 
   // Upsert all services in parallel. Stat mutations are safe: JS runs one

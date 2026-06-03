@@ -117,6 +117,7 @@ export default function ExtractPage() {
   const [text, setText] = useState('')
   const [urls, setUrls] = useState('')
   const [batchSupplier, setBatchSupplier] = useState('')
+  const [replaceExisting, setReplaceExisting] = useState(false)
   const [phase, setPhase] = useState<
     'idle' | 'extracting' | 'consolidating' | 'review' | 'importing' | 'done' | 'error'
   >('idle')
@@ -271,11 +272,14 @@ export default function ExtractPage() {
     }
     setPhase('importing')
     setErrorMsg('')
+    // Replace mode: only when the admin both named a supplier AND ticked the box.
+    const replaceSupplierName =
+      replaceExisting && batchSupplier.trim() ? batchSupplier.trim() : null
     try {
       const res = await fetch('/api/admin/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: clean }),
+        body: JSON.stringify({ rows: clean, replaceSupplierName }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -296,6 +300,7 @@ export default function ExtractPage() {
     setText('')
     setUrls('')
     setBatchSupplier('')
+    setReplaceExisting(false)
     setRows([])
     setSources([])
     setStats(null)
@@ -335,6 +340,28 @@ export default function ExtractPage() {
             <p className="mt-1.5 text-xs text-gray-500">
               כל השירותים יאוחדו תחת הספק הזה, וכל מחיר/מידע מהטקסט שתדביקו יסונכרן אל השירותים הנכונים.
             </p>
+
+            {/* Replace mode — for re-importing a supplier's corrected data without
+                duplicates. Requires a supplier name so we know whose catalog to replace. */}
+            <label
+              className={`mt-3 flex items-start gap-2 rounded-lg border p-2.5 transition-colors ${
+                batchSupplier.trim()
+                  ? 'cursor-pointer border-amber-200 bg-amber-50/60'
+                  : 'cursor-not-allowed border-gray-100 bg-gray-50'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={replaceExisting && batchSupplier.trim() !== ''}
+                disabled={batchSupplier.trim() === '' || phase === 'extracting'}
+                onChange={(e) => setReplaceExisting(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300"
+              />
+              <span className={`text-xs leading-snug ${batchSupplier.trim() ? 'text-amber-900' : 'text-gray-400'}`}>
+                <span className="font-semibold">החלף את כל השירותים הקיימים של הספק</span> — לתיקון נתונים: מסתיר את השירותים הקיימים של הספק ובונה אותם מחדש מהמקורות, בלי כפילויות (הישנים מוסתרים — ניתן לשחזר).
+                {batchSupplier.trim() === '' && ' הזינו שם ספק כדי להפעיל.'}
+              </span>
+            </label>
           </div>
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -557,6 +584,11 @@ export default function ExtractPage() {
                 <p className="text-sm text-emerald-700">
                   ערכו כל תא ישירות בטבלה. הקטגוריה תמופה אוטומטית לאחת מ-9 הקטגוריות בעת הייבוא.
                 </p>
+                {replaceExisting && batchSupplier.trim() !== '' && (
+                  <p className="mt-1 text-sm font-medium text-amber-700">
+                    ⚠️ מצב החלפה פעיל — בעת הייבוא, השירותים הקיימים של «{batchSupplier.trim()}» יוסתרו ויוחלפו בשורות שכאן.
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2">

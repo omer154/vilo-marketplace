@@ -34,8 +34,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'too many rows in one import (max 2000)' }, { status: 400 })
   }
 
+  // Optional: replace a named supplier's existing services (hide them) before
+  // importing, so a corrected re-import doesn't create duplicates.
+  const replaceSupplierName =
+    typeof body?.replaceSupplierName === 'string' && body.replaceSupplierName.trim()
+      ? body.replaceSupplierName.trim()
+      : null
+
   try {
-    const stats = await importCatalogRows(rows as CatalogRow[])
+    const stats = await importCatalogRows(rows as CatalogRow[], { replaceSupplierName })
     return NextResponse.json({ success: true, stats })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error'
