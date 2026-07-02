@@ -116,6 +116,7 @@ export default async function ServicesListPage({ searchParams }: PageProps) {
           </p>
           <a
             href={`/api/admin/services/export${showInactive ? '?active=all' : ''}`}
+            download
             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
           >
             ⬇ ייצא לאקסל
@@ -181,6 +182,13 @@ export default async function ServicesListPage({ searchParams }: PageProps) {
             איפוס
           </Link>
         )}
+        <a
+          href={`/api/admin/services/export${showInactive ? '?active=all' : ''}`}
+          download
+          className="ms-auto inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700"
+        >
+          ⬇ ייצא לאקסל ({total.toLocaleString('he-IL')})
+        </a>
       </form>
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">

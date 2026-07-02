@@ -550,6 +550,7 @@ export default function SupplierProfile({
             <div className="flex items-center gap-2">
               <a
                 href={`/api/admin/services/export?supplier=${supplier.id}`}
+                download
                 className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
               >
                 ⬇ ייצא לאקסל
