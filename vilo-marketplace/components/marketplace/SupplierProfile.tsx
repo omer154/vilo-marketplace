@@ -547,22 +547,30 @@ export default function SupplierProfile({
               <Sparkles className="h-4 w-4" />
               מצב ניהול פעיל — לחצו על שדה כדי לערוך; בתצוגת טבלה אפשר לגרור ערך לשורות רבות בבת אחת.
             </span>
-            <span className="inline-flex overflow-hidden rounded-lg border border-brand-200">
-              <button
-                type="button"
-                onClick={() => setView('cards')}
-                className={`px-3 py-1 text-xs font-medium transition ${view === 'cards' ? 'bg-brand-600 text-white' : 'bg-white text-brand-700 hover:bg-brand-50'}`}
+            <div className="flex items-center gap-2">
+              <a
+                href={`/api/admin/services/export?supplier=${supplier.id}`}
+                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
               >
-                כרטיסיות
-              </button>
-              <button
-                type="button"
-                onClick={() => setView('table')}
-                className={`px-3 py-1 text-xs font-medium transition ${view === 'table' ? 'bg-brand-600 text-white' : 'bg-white text-brand-700 hover:bg-brand-50'}`}
-              >
-                טבלה
-              </button>
-            </span>
+                ⬇ ייצא לאקסל
+              </a>
+              <span className="inline-flex overflow-hidden rounded-lg border border-brand-200">
+                <button
+                  type="button"
+                  onClick={() => setView('cards')}
+                  className={`px-3 py-1 text-xs font-medium transition ${view === 'cards' ? 'bg-brand-600 text-white' : 'bg-white text-brand-700 hover:bg-brand-50'}`}
+                >
+                  כרטיסיות
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView('table')}
+                  className={`px-3 py-1 text-xs font-medium transition ${view === 'table' ? 'bg-brand-600 text-white' : 'bg-white text-brand-700 hover:bg-brand-50'}`}
+                >
+                  טבלה
+                </button>
+              </span>
+            </div>
           </div>
         )}
 

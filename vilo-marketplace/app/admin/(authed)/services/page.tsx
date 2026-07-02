@@ -107,12 +107,20 @@ export default async function ServicesListPage({ searchParams }: PageProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-baseline justify-between">
+      <div className="flex items-baseline justify-between gap-3">
         <h1 className="text-2xl font-semibold text-gray-900">שירותים</h1>
-        <p className="text-sm text-gray-500">
-          {total.toLocaleString('he-IL')} שירותים{' '}
-          {showInactive ? '(כולל לא פעילים)' : '(פעילים בלבד)'}
-        </p>
+        <div className="flex items-center gap-3">
+          <p className="text-sm text-gray-500">
+            {total.toLocaleString('he-IL')} שירותים{' '}
+            {showInactive ? '(כולל לא פעילים)' : '(פעילים בלבד)'}
+          </p>
+          <a
+            href={`/api/admin/services/export${showInactive ? '?active=all' : ''}`}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+          >
+            ⬇ ייצא לאקסל
+          </a>
+        </div>
       </div>
 
       <form
